@@ -1,0 +1,33 @@
+<!--
+  Weather widget template for Inker custom widget.
+  Configure in Inker: Custom Widget → JSON URL → http://trmnl-aggregator:8081/data/weather
+-->
+<div style="font-family: monospace; padding: 12px;">
+  <div style="font-size: 18px; font-weight: bold; border-bottom: 2px solid #000; margin-bottom: 8px;">
+    ⛅ Weather — Livermore
+  </div>
+
+  <div style="display: flex; align-items: center; margin-bottom: 16px;">
+    <div style="font-size: 48px; font-weight: bold; margin-right: 16px;">
+      {{ current.temp_f }}°F
+    </div>
+    <div>
+      <div style="font-size: 16px;">{{ current.condition }}</div>
+      <div style="font-size: 12px;">Feels like {{ current.feels_like_f }}°F</div>
+      <div style="font-size: 12px;">Humidity: {{ current.humidity_pct }}%  Wind: {{ current.wind_mph }} mph</div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; font-size: 11px;">
+    {% for day in forecast %}
+    <div style="text-align: center; border: 1px solid #ccc; padding: 4px;">
+      <div style="font-weight: bold;">{{ day.date[5:] }}</div>
+      <div>{{ day.condition[:8] }}</div>
+      <div>{{ day.high | int }}° / {{ day.low | int }}°</div>
+      {% if day.precip_in > 0.01 %}
+      <div>💧 {{ day.precip_in }}"</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>

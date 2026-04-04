@@ -1,0 +1,30 @@
+<!--
+  Calendar widget template for Inker custom widget.
+  Configure in Inker: Custom Widget → JSON URL → http://trmnl-aggregator:8081/data/calendar
+-->
+<div style="font-family: monospace; padding: 12px;">
+  <div style="font-size: 18px; font-weight: bold; border-bottom: 2px solid #000; margin-bottom: 8px;">
+    📅 Family Calendar
+  </div>
+
+  {% if events %}
+  {% for event in events[:8] %}
+  <div style="display: flex; gap: 8px; padding: 5px 0; border-bottom: 1px solid #eee;">
+    <div style="font-size: 11px; color: #555; min-width: 70px; white-space: nowrap;">
+      {{ event.start[:10] }}
+      {% if not event.all_day %}
+      <br>{{ event.start[11:16] }}
+      {% endif %}
+    </div>
+    <div>
+      <div style="font-size: 13px; font-weight: bold;">{{ event.summary }}</div>
+      {% if event.location %}
+      <div style="font-size: 11px; color: #666;">📍 {{ event.location }}</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div style="color: #999;">No upcoming events</div>
+  {% endif %}
+</div>

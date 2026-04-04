@@ -1,0 +1,43 @@
+<!--
+  Sports widget template for Inker custom widget.
+  Configure in Inker: Custom Widget → JSON URL → http://trmnl-aggregator:8081/data/sports
+-->
+<div style="font-family: monospace; padding: 12px;">
+  <div style="font-size: 18px; font-weight: bold; border-bottom: 2px solid #000; margin-bottom: 8px;">
+    🏀 {{ league }} Scores
+  </div>
+
+  {% if today %}
+  <div style="margin-bottom: 12px;">
+    <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">TODAY</div>
+    {% for game in today %}
+    <div style="display: flex; justify-content: space-between; padding: 4px 0;
+                border-bottom: 1px solid #eee;
+                {% if game.our_team %}font-weight: bold;{% endif %}">
+      <span>{{ game.away_team[:15] }}</span>
+      <span>
+        {% if game.completed %}
+          {{ game.away_score }} – {{ game.home_score }}
+        {% else %}
+          vs
+        {% endif %}
+      </span>
+      <span>{{ game.home_team[:15] }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div style="color: #999; margin-bottom: 12px;">No games today</div>
+  {% endif %}
+
+  {% if tomorrow %}
+  <div>
+    <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">TOMORROW</div>
+    {% for game in tomorrow[:3] %}
+    <div style="font-size: 11px; padding: 2px 0; {% if game.has_our_team %}font-weight: bold;{% endif %}">
+      {{ game.name }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
