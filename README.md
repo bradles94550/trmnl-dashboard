@@ -7,17 +7,18 @@ Runs on **deepthought** (Pi 5, Livermore house) as a Docker Compose stack.
 
 ```
 TRMNL X device
-    │  polls /api/display every N seconds
+    │  polls GET /api/display every N seconds
     ▼
-Inker (port 8080)           ← screen designer + TRMNL protocol server
-    │  custom widget JSON fetch
-    ▼
-Aggregator (port 8081)      ← Python/FastAPI, caches data from 4 sources
+Aggregator (port 8081)      ← Python/FastAPI — BYOS protocol + data + PNG renderer
     ├── Home Assistant REST API  (deepthought-ha:8123)
     ├── Open-Meteo               (free, no key)
     ├── ESPN unofficial API      (free, no key)
     └── Google Calendar iCal    (private URL, no OAuth)
 ```
+
+> **Note on Inker:** The original plan used `wojooo/inker` as the BYOS server, but that image
+> has no ARM64 build and won't run on deepthought (Pi 5). The aggregator implements the TRMNL
+> BYOS `/api/display` protocol directly using Pillow for PNG rendering — fully ARM64 native.
 
 ## Quick Start
 
@@ -40,22 +41,11 @@ curl http://localhost:8081/health
 curl http://localhost:8081/data/weather
 ```
 
-### 4. Open Inker UI
-Navigate to `http://deepthought-ip:8080` and enter your `INKER_ADMIN_PIN`.
+### 4. Pair TRMNL X
+Connect device to WiFi via captive portal → set server URL to `http://192.168.86.69:8081`
 
-### 5. Pair TRMNL X
-Connect device to WiFi via captive portal → set server URL to `http://192.168.86.69:8080`
-
+The device will start polling `GET /api/display` and cycle through 4 screens automatically.
 See **docs/02-trmnl-pairing.md** for full pairing instructions.
-
-### 6. Configure custom widgets in Inker
-For each data source, create a Custom Widget pointing at:
-- HA Status: `http://trmnl-aggregator:8081/data/ha`
-- Weather: `http://trmnl-aggregator:8081/data/weather`
-- Sports: `http://trmnl-aggregator:8081/data/sports`
-- Calendar: `http://trmnl-aggregator:8081/data/calendar`
-
-HTML templates for each screen are in `aggregator/templates/`.
 
 ## Playlist (suggested rotation)
 | Screen | Refresh |
@@ -69,10 +59,12 @@ HTML templates for each screen are in `aggregator/templates/`.
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Cache ages + status |
-| `GET /data/ha` | HA entity states + summary |
-| `GET /data/weather` | Current conditions + 5-day forecast |
-| `GET /data/sports` | Today's scores + tomorrow's schedule |
-| `GET /data/calendar` | Next 14 days of events |
+| `GET /api/display` | **TRMNL BYOS endpoint** — returns PNG image_url + refresh_rate |
+| `GET /images/{filename}` | Serves rendered PNG to the device |
+| `GET /data/ha` | HA entity states + summary (JSON) |
+| `GET /data/weather` | Current conditions + 5-day forecast (JSON) |
+| `GET /data/sports` | Today's scores + tomorrow's schedule (JSON) |
+| `GET /data/calendar` | Next 14 days of events (JSON) |
 | `POST /refresh/{source}` | Force immediate cache refresh |
 
 ## Documentation

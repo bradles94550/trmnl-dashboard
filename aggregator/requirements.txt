@@ -4,3 +4,4 @@ apscheduler==3.10.4
 httpx==0.27.2
 icalendar==6.0.0
 python-dotenv==1.0.1
+Pillow==10.4.0

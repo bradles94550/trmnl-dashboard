@@ -1,9 +1,12 @@
 """
 TRMNL Dashboard Aggregator
 Fetches data from HA, Open-Meteo, ESPN, and Google Calendar.
-Exposes JSON endpoints that Inker custom widgets consume.
-APScheduler refreshes caches on configurable TTLs.
+Implements the TRMNL BYOS /api/display protocol directly — no Inker required.
+Renders 1872×1404 PNG images with Pillow (ARM64 native).
+APScheduler refreshes data caches on configurable TTLs.
 """
+import hashlib
+import io
 import os
 import time
 import logging
@@ -11,10 +14,12 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from icalendar import Calendar
 from dotenv import load_dotenv
+from renderer import render_screen
 
 load_dotenv()
 
@@ -32,6 +37,10 @@ ESPN_SPORT = os.getenv("ESPN_SPORT", "basketball")
 ESPN_LEAGUE = os.getenv("ESPN_LEAGUE", "nba")
 ESPN_TEAM_ID = os.getenv("ESPN_TEAM_ID", "11")
 ICAL_URLS = [u.strip() for u in os.getenv("ICAL_URL", "").split(",") if u.strip()]
+TRMNL_ACCESS_TOKEN = os.getenv("TRMNL_ACCESS_TOKEN", "")  # optional: set to enforce device auth
+
+# Playlist rotation: screens cycle in this order
+PLAYLIST = ["ha", "weather", "sports", "calendar"]
 TTL_HA = int(os.getenv("CACHE_TTL_HA", "300"))
 TTL_CALENDAR = int(os.getenv("CACHE_TTL_CALENDAR", "900"))
 TTL_WEATHER = int(os.getenv("CACHE_TTL_WEATHER", "1800"))
@@ -372,3 +381,88 @@ async def manual_refresh(source: str):
         raise HTTPException(404, f"Unknown source: {source}. Valid: {list(refreshers)}")
     await refreshers[source]()
     return {"status": "refreshed", "source": source, "age": _age(source)}
+
+
+# ── TRMNL BYOS Protocol ───────────────────────────────────────────────────────
+# Device state: tracks which playlist screen each device is on
+_device_state: dict[str, int] = {}
+
+# Image cache: filename → PNG bytes (so /images/<filename> can serve it)
+_image_cache: dict[str, bytes] = {}
+
+@app.get("/api/display")
+async def trmnl_display(request: Request):
+    """
+    TRMNL BYOS /api/display endpoint.
+    Device sends: ID header (MAC), Access-Token header.
+    Returns: JSON with image_url, filename, refresh_rate.
+    """
+    device_id = request.headers.get("ID") or request.headers.get("X-Device-ID", "unknown")
+    token = request.headers.get("Access-Token", "")
+
+    if TRMNL_ACCESS_TOKEN and token != TRMNL_ACCESS_TOKEN:
+        log.warning(f"TRMNL device {device_id} sent wrong token")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    log.info(f"TRMNL display request from device {device_id}")
+
+    # Advance to next screen in playlist
+    idx = _device_state.get(device_id, -1)
+    idx = (idx + 1) % len(PLAYLIST)
+    _device_state[device_id] = idx
+    screen = PLAYLIST[idx]
+
+    # Fetch data for this screen
+    source_getters = {
+        "ha": lambda: _get("ha", TTL_HA * 2),
+        "weather": lambda: _get("weather", TTL_WEATHER * 2),
+        "sports": lambda: _get("sports", TTL_SPORTS * 2),
+        "calendar": lambda: _get("calendar", TTL_CALENDAR * 2),
+    }
+    data = source_getters[screen]() or {}
+
+    # Render PNG
+    try:
+        img = render_screen(screen, data)
+    except Exception as e:
+        log.error(f"Render failed for {screen}: {e}")
+        return JSONResponse({"error": "render failed"}, status_code=500)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+
+    # Unique filename based on content hash (device uses this for change detection)
+    filename = f"{screen}-{hashlib.md5(png_bytes).hexdigest()[:8]}.png"
+    _image_cache[filename] = png_bytes
+
+    # Prune old images (keep last 20)
+    if len(_image_cache) > 20:
+        oldest = list(_image_cache.keys())[:-20]
+        for k in oldest:
+            del _image_cache[k]
+
+    # Determine refresh interval for this screen (seconds)
+    refresh_map = {"ha": TTL_HA, "weather": TTL_WEATHER, "sports": TTL_SPORTS, "calendar": TTL_CALENDAR}
+    refresh_rate = refresh_map.get(screen, 300)
+
+    # Build base URL from request
+    base_url = str(request.base_url).rstrip("/")
+    image_url = f"{base_url}/images/{filename}"
+
+    log.info(f"Serving {screen} → {filename} to device {device_id}")
+    return {
+        "image_url": image_url,
+        "filename": filename,
+        "refresh_rate": refresh_rate,
+        "update_firmware": False,
+    }
+
+
+@app.get("/images/{filename}")
+async def serve_image(filename: str):
+    """Serve pre-rendered PNG images to the TRMNL device."""
+    png = _image_cache.get(filename)
+    if not png:
+        raise HTTPException(404, "Image not found or expired")
+    return Response(content=png, media_type="image/png")
