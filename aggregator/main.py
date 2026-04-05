@@ -472,10 +472,13 @@ async def trmnl_display(request: Request):
 
     log.info(f"Serving {screen} → {filename} to device {device_id}")
     return {
+        "status": 0,
         "image_url": image_url,
         "filename": filename,
         "refresh_rate": refresh_rate,
         "update_firmware": False,
+        "firmware_url": None,
+        "reset_firmware": False,
     }
 
 

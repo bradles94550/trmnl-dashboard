@@ -283,5 +283,5 @@ def render_screen(name: str, data: dict[str, Any]) -> Image.Image:
     if not renderer:
         raise ValueError(f"Unknown screen: {name}")
     img = renderer(data)
-    # Convert to 2-bit grayscale (TRMNL X native)
-    return img.convert("1").convert("L")
+    # Convert to 1-bit (TRMNL X native — black/white only)
+    return img.convert("1")
