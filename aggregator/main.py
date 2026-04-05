@@ -449,12 +449,12 @@ async def trmnl_display(request: Request):
         return JSONResponse({"error": "render failed"}, status_code=500)
 
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    png_bytes = buf.getvalue()
+    img.save(buf, format="BMP")
+    img_bytes = buf.getvalue()
 
     # Unique filename based on content hash (device uses this for change detection)
-    filename = f"{screen}-{hashlib.md5(png_bytes).hexdigest()[:8]}.png"
-    _image_cache[filename] = png_bytes
+    filename = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.bmp"
+    _image_cache[filename] = img_bytes
 
     # Prune old images (keep last 20)
     if len(_image_cache) > 20:
@@ -479,13 +479,14 @@ async def trmnl_display(request: Request):
         "update_firmware": False,
         "firmware_url": None,
         "reset_firmware": False,
+        "image_url_timeout": 0,
     }
 
 
 @app.get("/images/{filename}")
 async def serve_image(filename: str):
-    """Serve pre-rendered PNG images to the TRMNL device."""
-    png = _image_cache.get(filename)
-    if not png:
+    """Serve pre-rendered BMP images to the TRMNL device."""
+    img_data = _image_cache.get(filename)
+    if not img_data:
         raise HTTPException(404, "Image not found or expired")
-    return Response(content=png, media_type="image/png")
+    return Response(content=img_data, media_type="image/bmp")
