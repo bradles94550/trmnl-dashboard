@@ -46,6 +46,9 @@ ESPN_LEAGUE = os.getenv("ESPN_LEAGUE", "nba")
 ESPN_TEAM_ID = os.getenv("ESPN_TEAM_ID", "11")
 ICAL_URLS = [u.strip() for u in os.getenv("ICAL_URL", "").split(",") if u.strip()]
 TRMNL_ACCESS_TOKEN = os.getenv("TRMNL_ACCESS_TOKEN", "")  # optional: set to enforce device auth
+# Explicit base URL override — set this to e.g. http://192.168.86.69:8081 if
+# request.base_url auto-detection is unreliable (behind proxy, Docker NAT, etc.)
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").rstrip("/")
 
 # Playlist rotation: screens cycle in this order
 PLAYLIST = ["ha", "weather", "sports", "calendar"]
@@ -330,6 +333,48 @@ async def refresh_calendar():
 
 scheduler = AsyncIOScheduler()
 
+# ── Static image cache (permanent, never pruned) ───────────────────────────────
+# Pre-rendered images that are always available regardless of rotation state.
+_static_images: dict[str, bytes] = {}
+
+def _render_static_png(name: str, data: dict) -> bytes:
+    """Render a screen and return PNG bytes."""
+    from renderer import render_screen
+    img = render_screen(name, data)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def _build_welcome_image() -> bytes:
+    """Generate a simple welcome/setup PNG for the setup endpoint."""
+    from PIL import Image, ImageDraw
+    img = Image.new("L", (1872, 1404), 255)
+    draw = ImageDraw.Draw(img)
+    # Header bar
+    draw.rectangle([0, 0, 1872, 120], fill=0)
+    # Use default font — truetype not guaranteed at startup
+    draw.text((40, 35), "TRMNL X — Setup Complete", fill=255)
+    draw.text((40, 300), "Connected to local BYOS server.", fill=0)
+    draw.text((40, 380), "Display will update shortly.", fill=0)
+    mono = img.convert("1")
+    buf = io.BytesIO()
+    mono.save(buf, format="PNG")
+    return buf.getvalue()
+
+def _build_error_image(message: str = "Render error — retrying next cycle") -> bytes:
+    """Generate a simple error PNG to show when rendering fails."""
+    from PIL import Image, ImageDraw
+    img = Image.new("L", (1872, 1404), 255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, 1872, 120], fill=0)
+    draw.text((40, 35), "TRMNL — Display Error", fill=255)
+    draw.text((40, 300), message[:80], fill=0)
+    draw.text((40, 380), "Will retry on next refresh cycle.", fill=0)
+    mono = img.convert("1")
+    buf = io.BytesIO()
+    mono.save(buf, format="PNG")
+    return buf.getvalue()
+
 @app.on_event("startup")
 async def startup():
     scheduler.add_job(refresh_ha, "interval", seconds=TTL_HA, id="ha")
@@ -342,11 +387,36 @@ async def startup():
     await refresh_sports()
     await refresh_calendar()
     await refresh_ha()
+
+    # Pre-render static images
+    try:
+        _static_images["welcome.png"] = _build_welcome_image()
+        log.info("Welcome image generated")
+    except Exception as e:
+        log.error(f"Failed to generate welcome image: {e}")
+    try:
+        _static_images["error.png"] = _build_error_image()
+        log.info("Error fallback image generated")
+    except Exception as e:
+        log.error(f"Failed to generate error image: {e}")
+
     log.info("Aggregator started — all caches warmed")
 
 @app.on_event("shutdown")
 async def shutdown():
     scheduler.shutdown()
+
+# ── Base URL helper ────────────────────────────────────────────────────────────
+def _base_url(request: Request) -> str:
+    """Return the server base URL the TRMNL device can reach.
+
+    Priority:
+    1. SERVER_BASE_URL env var (explicit override)
+    2. request.base_url from Host header (works when device connects directly)
+    """
+    if SERVER_BASE_URL:
+        return SERVER_BASE_URL
+    return str(request.base_url).rstrip("/")
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
 @app.get("/health")
@@ -354,6 +424,7 @@ async def health():
     return {
         "status": "ok",
         "cache_ages": {k: _age(k) for k in ["ha", "weather", "sports", "calendar"]},
+        "server_base_url": SERVER_BASE_URL or "(auto from Host header)",
     }
 
 @app.get("/data/ha")
@@ -409,13 +480,14 @@ async def trmnl_setup(request: Request):
     log.info(f"TRMNL setup request from device {device_id}")
     api_key = TRMNL_ACCESS_TOKEN if TRMNL_ACCESS_TOKEN else "byos-local-key"
     friendly_id = device_id.replace(":", "")[-6:].upper() if device_id != "unknown" else "BYOS01"
-    base_url = str(request.base_url).rstrip("/")
+    base_url = _base_url(request)
     return {
         "status": 200,
         "api_key": api_key,
         "friendly_id": friendly_id,
-        "image_url": f"{base_url}/images/welcome.bmp",
+        "image_url": f"{base_url}/images/welcome.png",
         "filename": "setup_complete",
+        "message": "Connected to local BYOS server",
     }
 
 
@@ -425,13 +497,30 @@ async def trmnl_display(request: Request):
     TRMNL BYOS /api/display endpoint.
     Device sends: ID header (MAC), Access-Token header.
     Returns: JSON with image_url, filename, refresh_rate.
+
+    IMPORTANT: Must always return HTTP 200 with valid JSON.
+    Non-200 responses cause the firmware to show "WiFi connected, but API
+    connection cannot be established" (HTTPS_RESPONSE_CODE_INVALID error).
     """
     device_id = request.headers.get("ID") or request.headers.get("X-Device-ID", "unknown")
     token = request.headers.get("Access-Token", "")
 
     if TRMNL_ACCESS_TOKEN and token != TRMNL_ACCESS_TOKEN:
-        log.warning(f"TRMNL device {device_id} sent wrong token")
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+        log.warning(f"TRMNL device {device_id} sent wrong token: '{token}'")
+        # Return 200 with error image rather than 401 — a 401 would show
+        # "WiFi connected, but API connection cannot be established" on the device.
+        base_url = _base_url(request)
+        error_filename = "error.png"
+        return JSONResponse({
+            "status": 0,
+            "image_url": f"{base_url}/images/{error_filename}",
+            "filename": error_filename,
+            "refresh_rate": 300,
+            "update_firmware": False,
+            "firmware_url": "",
+            "reset_firmware": False,
+            "image_url_timeout": 0,
+        })
 
     log.info(f"TRMNL display request from device {device_id}")
 
@@ -450,53 +539,57 @@ async def trmnl_display(request: Request):
     }
     data = source_getters[screen]() or {}
 
-    # Render PNG
+    base_url = _base_url(request)
+
+    # Render PNG — fall back to error image on failure rather than returning 500.
+    # A 500 would cause the firmware to show "WiFi connected, but API connection
+    # cannot be established" (HTTPS_RESPONSE_CODE_INVALID).
+    img_bytes = None
+    filename = None
     try:
         img = render_screen(screen, data)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        img_bytes = buf.getvalue()
+        filename = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
     except Exception as e:
         log.error(f"Render failed for {screen}: {e}")
-        return JSONResponse({"error": "render failed"}, status_code=500)
+        filename = "error.png"
+        img_bytes = _static_images.get("error.png") or _build_error_image(str(e)[:80])
 
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    img_bytes = buf.getvalue()
-
-    # Unique filename based on content hash (device uses this for change detection)
-    filename = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
     _image_cache[filename] = img_bytes
 
-    # Prune old images (keep last 20)
+    # Prune old images (keep last 20), but never prune static images
     if len(_image_cache) > 20:
-        oldest = list(_image_cache.keys())[:-20]
-        for k in oldest:
+        pruneable = [k for k in list(_image_cache.keys()) if k not in _static_images]
+        for k in pruneable[:-20]:
             del _image_cache[k]
 
     # Determine refresh interval for this screen (seconds)
     refresh_map = {"ha": TTL_HA, "weather": TTL_WEATHER, "sports": TTL_SPORTS, "calendar": TTL_CALENDAR}
     refresh_rate = refresh_map.get(screen, 300)
 
-    # Build base URL from request
-    base_url = str(request.base_url).rstrip("/")
     image_url = f"{base_url}/images/{filename}"
 
     log.info(f"Serving {screen} → {filename} to device {device_id}")
-    return {
+    return JSONResponse({
         "status": 0,
         "image_url": image_url,
         "filename": filename,
         "refresh_rate": refresh_rate,
         "update_firmware": False,
-        "firmware_url": None,
+        "firmware_url": "",
         "reset_firmware": False,
         "image_url_timeout": 0,
-    }
+    })
 
 
 @app.get("/images/{filename}")
 async def serve_image(filename: str):
     """Serve pre-rendered PNG images to the TRMNL device."""
-    img_data = _image_cache.get(filename)
+    # Check static images first (welcome, error, etc.)
+    img_data = _static_images.get(filename) or _image_cache.get(filename)
     if not img_data:
         raise HTTPException(404, "Image not found or expired")
-    media_type = "image/png" if filename.endswith(".png") else "image/bmp"
-    return Response(content=img_data, media_type=media_type)
+    # All images are PNG regardless of extension in the filename
+    return Response(content=img_data, media_type="image/png")
