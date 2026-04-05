@@ -390,6 +390,26 @@ _device_state: dict[str, int] = {}
 # Image cache: filename → PNG bytes (so /images/<filename> can serve it)
 _image_cache: dict[str, bytes] = {}
 
+@app.get("/api/setup")
+async def trmnl_setup(request: Request):
+    """
+    TRMNL BYOS /api/setup endpoint.
+    Called by the device during initial WiFi provisioning/setup.
+    Returns device credentials so the device can proceed to /api/display.
+    """
+    device_id = request.headers.get("ID") or request.headers.get("X-Device-ID", "unknown")
+    log.info(f"TRMNL setup request from device {device_id}")
+    api_key = TRMNL_ACCESS_TOKEN if TRMNL_ACCESS_TOKEN else "byos-local-key"
+    friendly_id = device_id.replace(":", "")[-6:].upper() if device_id != "unknown" else "BYOS01"
+    return {
+        "status": 200,
+        "api_key": api_key,
+        "friendly_id": friendly_id,
+        "image_url": None,
+        "filename": "setup_complete",
+    }
+
+
 @app.get("/api/display")
 async def trmnl_display(request: Request):
     """
