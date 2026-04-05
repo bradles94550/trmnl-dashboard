@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from icalendar import Calendar
@@ -27,6 +28,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="TRMNL Aggregator", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HA_URL = os.getenv("HA_URL", "http://192.168.86.69:8123")
@@ -401,11 +409,12 @@ async def trmnl_setup(request: Request):
     log.info(f"TRMNL setup request from device {device_id}")
     api_key = TRMNL_ACCESS_TOKEN if TRMNL_ACCESS_TOKEN else "byos-local-key"
     friendly_id = device_id.replace(":", "")[-6:].upper() if device_id != "unknown" else "BYOS01"
+    base_url = str(request.base_url).rstrip("/")
     return {
         "status": 200,
         "api_key": api_key,
         "friendly_id": friendly_id,
-        "image_url": None,
+        "image_url": f"{base_url}/images/welcome.bmp",
         "filename": "setup_complete",
     }
 
@@ -449,11 +458,11 @@ async def trmnl_display(request: Request):
         return JSONResponse({"error": "render failed"}, status_code=500)
 
     buf = io.BytesIO()
-    img.save(buf, format="BMP")
+    img.save(buf, format="PNG")
     img_bytes = buf.getvalue()
 
     # Unique filename based on content hash (device uses this for change detection)
-    filename = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.bmp"
+    filename = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
     _image_cache[filename] = img_bytes
 
     # Prune old images (keep last 20)
@@ -485,8 +494,9 @@ async def trmnl_display(request: Request):
 
 @app.get("/images/{filename}")
 async def serve_image(filename: str):
-    """Serve pre-rendered BMP images to the TRMNL device."""
+    """Serve pre-rendered PNG images to the TRMNL device."""
     img_data = _image_cache.get(filename)
     if not img_data:
         raise HTTPException(404, "Image not found or expired")
-    return Response(content=img_data, media_type="image/bmp")
+    media_type = "image/png" if filename.endswith(".png") else "image/bmp"
+    return Response(content=img_data, media_type=media_type)
