@@ -561,6 +561,26 @@ def render_main(data: dict[str, Any]) -> Image.Image:
                 draw.text((s_left + 8, sy), f"{venue} {opp}  {dt}", font=f_game, fill=FG)
                 sy += 34
 
+    # ── F1 next race in sports panel ─────────────────────────────────────────────
+    if sy + 12 < sports_bottom - 60:
+        draw.line([s_left, sy + 4, s_right, sy + 4], fill=128, width=1)
+        sy += 14
+    if sy + 40 < sports_bottom:
+        draw.text((s_left, sy), "Formula 1", font=f_team, fill=FG)
+        sy += 42
+        f1_data      = data.get("sports_f1", {})
+        race_name_f1 = f1_data.get("race_name", "")
+        f1_sessions  = f1_data.get("sessions", [])
+        race_sess_f1 = next((s for s in f1_sessions if s.get("name") == "Race"), None)
+        if race_name_f1 and sy + 30 < sports_bottom:
+            draw.text((s_left + 8, sy), race_name_f1[:24], font=f_game, fill=FG)
+            sy += 30
+        if race_sess_f1 and sy + 30 < sports_bottom:
+            draw.text((s_left + 8, sy),
+                      f"Race: {race_sess_f1.get('display_date', '')}  {race_sess_f1.get('display_time', '')}",
+                      font=f_game, fill=DARK)
+            sy += 30
+
     # ── Top Right: Weather ────────────────────────────────────────────────────
     weather        = data.get("weather", {})
     wx0            = SPLIT_X + BORDER + PAD
@@ -703,11 +723,117 @@ def render_main(data: dict[str, Any]) -> Image.Image:
 
     return img
 
+
+# ── All Sports Screen ──────────────────────────────────────────────────────────
+def render_sports_all(data: dict[str, Any]) -> Image.Image:
+    img, draw = _new_canvas()
+    y = _header(draw, "Sports", datetime.now().strftime("%a %b %-d"))
+
+    f_team   = _font(48)
+    f_detail = _font(40, bold=False)
+
+    # ── Giants ────────────────────────────────────────────────────────────────
+    giants = data.get("giants", {})
+    y = _section_bar(draw, y, "SF Giants  \u26be", font_size=40)
+    series_list = giants.get("series", [])
+    if not series_list:
+        draw.text((40, y + 8), "No upcoming games", font=f_detail, fill=DARK)
+        y += 52
+    else:
+        for series in series_list[:1]:
+            venue = series.get("venue_flag", "vs")
+            opp   = series.get("opponent", "")[:22]
+            n     = series.get("num_games", 0)
+            draw.text((40, y + 6), f"{venue} {opp}  ({n}-game series)", font=f_team, fill=FG)
+            y += 56
+            for game in series.get("games", [])[:3]:
+                if y + 44 > CONTENT_MAX_Y - 560:
+                    break
+                draw.text((72, y), f"{game['display_date']}  {game['display_time']}", font=f_detail, fill=DARK)
+                y += 44
+            y += 4
+    draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
+    y += 12
+
+    # ── 49ers ─────────────────────────────────────────────────────────────────
+    niners = data.get("niners", {})
+    y = _section_bar(draw, y, "SF 49ers  \U0001f3c8", font_size=40)
+    niner_games = niners.get("games", [])
+    if not niner_games:
+        draw.text((40, y + 8), "Off-season \u2014 no upcoming games", font=f_detail, fill=DARK)
+        y += 52
+    else:
+        for game in niner_games[:2]:
+            if y + 52 > CONTENT_MAX_Y - 420:
+                break
+            venue = game.get("venue_flag", "vs")
+            opp   = game.get("opponent", "")[:22]
+            dt    = f"{game.get('display_date', '')}  {game.get('display_time', '')}"
+            draw.text((40, y + 6), f"{venue} {opp}  {dt}", font=f_team, fill=FG)
+            y += 52
+    draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
+    y += 12
+
+    # ── Formula 1 ─────────────────────────────────────────────────────────────
+    f1 = data.get("f1", {})
+    rnd    = f1.get("round", "?")
+    season = f1.get("season", "")
+    y = _section_bar(draw, y, f"Formula 1 \u2014 Rnd {rnd} {season}", font_size=40)
+    race_name = f1.get("race_name", "")
+    if not race_name:
+        draw.text((40, y + 8), "No F1 data", font=f_detail, fill=DARK)
+        y += 52
+    else:
+        draw.text((40, y + 6), race_name[:40], font=f_team, fill=FG)
+        y += 56
+        sessions = f1.get("sessions", [])
+        race_sess = next((s for s in sessions if s.get("name") == "Race"), None)
+        if race_sess:
+            past_marker = " \u2713" if race_sess.get("past") else ""
+            color = DARK if race_sess.get("past") else FG
+            draw.text((72, y),
+                      f"Race: {race_sess.get('display_date', '')}  {race_sess.get('display_time', '')}{past_marker}",
+                      font=f_detail, fill=color)
+            y += 44
+        y += 4
+    draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
+    y += 12
+
+    # ── Soccer ────────────────────────────────────────────────────────────────
+    for club_key, club_label, emoji in [
+        ("spurs",   "Tottenham Hotspur", "\u26bd"),
+        ("mancity", "Manchester City",   "\u26bd"),
+    ]:
+        club = data.get(club_key, {})
+        y = _section_bar(draw, y, f"{club.get('label', club_label)}  {emoji}", font_size=40)
+        club_games = club.get("games", [])
+        if not club_games:
+            draw.text((40, y + 8), "No upcoming fixtures", font=f_detail, fill=DARK)
+            y += 52
+        else:
+            for game in club_games[:2]:
+                if y + 52 > CONTENT_MAX_Y - 20:
+                    break
+                venue = game.get("venue_flag", "vs")
+                opp   = game.get("opponent", "")[:22]
+                comp  = game.get("competition", "")
+                draw.text((40, y + 6),
+                          f"{venue} {opp}  {game.get('display_date', '')}  {game.get('display_time', '')}  [{comp}]",
+                          font=f_detail, fill=FG)
+                y += 48
+        if club_key == "spurs" and y < CONTENT_MAX_Y - 80:
+            draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
+            y += 12
+
+    _footer(draw, f"ESPN / Jolpica F1  \u2022  {data.get('fetched_at', '')[:16]}Z")
+    return img
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 RENDERERS = {
     "ha":            render_ha,
     "weather":       render_weather,
     "sports_f1":     render_sports_f1,
+    "sports_all":    render_sports_all,
     "sports_us":     render_sports_us,
     "sports_soccer": render_sports_soccer,
     "calendar":      render_calendar,

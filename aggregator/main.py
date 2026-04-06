@@ -58,7 +58,7 @@ SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").rstrip("/")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
 # Playlist rotation: screens cycle in this order
-PLAYLIST = ["main", "ha", "weather", "sports_f1", "sports_us", "sports_soccer", "calendar"]
+PLAYLIST = ["main", "ha", "weather", "sports_all", "calendar"]
 
 TTL_HA       = int(os.getenv("CACHE_TTL_HA",       "300"))
 TTL_CALENDAR = int(os.getenv("CACHE_TTL_CALENDAR", "900"))
@@ -78,13 +78,11 @@ LEAGUE_DISPLAY = {
 
 # Map playlist screen → (cache key, ttl)
 _SCREEN_CACHE: dict[str, tuple[str, int]] = {
-    "ha":           ("ha",           TTL_HA),
-    "weather":      ("weather",      TTL_WEATHER),
-    "sports_f1":    ("sports_f1",    TTL_SPORTS),
-    "sports_us":    ("sports_us",    TTL_SPORTS),
-    "sports_soccer":("sports_soccer",TTL_SPORTS),
-    "calendar":     ("calendar",     TTL_CALENDAR),
-    "main":         ("main",         TTL_MAIN),
+    "ha":          ("ha",          TTL_HA),
+    "weather":     ("weather",     TTL_WEATHER),
+    "sports_all":  ("sports_all",  TTL_SPORTS),
+    "calendar":    ("calendar",    TTL_CALENDAR),
+    "main":        ("main",        TTL_MAIN),
 }
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
@@ -105,6 +103,25 @@ def _age(key: str) -> str:
         return "never"
     secs = int(time.time() - entry["ts"])
     return f"{secs}s ago"
+
+# ── Pre-render cache ──────────────────────────────────────────────────────────
+_pre_render_cache: dict[str, bytes] = {}
+
+async def pre_render_all_screens() -> None:
+    """Pre-render all playlist screens and cache PNG bytes for instant serving."""
+    rendered = 0
+    for screen in PLAYLIST:
+        try:
+            cache_key, ttl = _SCREEN_CACHE[screen]
+            data = _get(cache_key, ttl * 4) or {}
+            img = render_screen(screen, data)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            _pre_render_cache[screen] = buf.getvalue()
+            rendered += 1
+        except Exception as e:
+            log.error(f"Pre-render failed for {screen}: {e}")
+    log.info(f"Pre-rendered {rendered}/{len(PLAYLIST)} screens")
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
 def _to_pt(dt_str: str) -> datetime | None:
@@ -512,6 +529,37 @@ async def refresh_sports_soccer():
     except Exception as e:
         log.error(f"Sports Soccer refresh failed: {e}")
 
+async def refresh_sports_all():
+    """Assemble combined sports data from the three individual caches."""
+    try:
+        f1_data = _get("sports_f1",    TTL_SPORTS * 4)
+        us_data = _get("sports_us",    TTL_SPORTS * 4)
+        sc_data = _get("sports_soccer",TTL_SPORTS * 4)
+        tasks = []
+        if f1_data is None:
+            tasks.append(refresh_sports_f1())
+        if us_data is None:
+            tasks.append(refresh_sports_us())
+        if sc_data is None:
+            tasks.append(refresh_sports_soccer())
+        if tasks:
+            await asyncio.gather(*tasks)
+            f1_data = _get("sports_f1",    TTL_SPORTS * 4) or {}
+            us_data = _get("sports_us",    TTL_SPORTS * 4) or {}
+            sc_data = _get("sports_soccer",TTL_SPORTS * 4) or {}
+        combined = {
+            "f1":      f1_data or {},
+            "giants":  (us_data or {}).get("giants", {}),
+            "niners":  (us_data or {}).get("niners", {}),
+            "spurs":   (sc_data or {}).get("spurs", {}),
+            "mancity": (sc_data or {}).get("mancity", {}),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _set("sports_all", combined)
+        log.info("Sports All cache refreshed")
+    except Exception as e:
+        log.error(f"Sports All refresh failed: {e}")
+
 async def refresh_calendar():
     try:
         _set("calendar", await fetch_calendar())
@@ -524,6 +572,7 @@ async def refresh_main():
         combined = {
             "weather":   _get("weather",   TTL_WEATHER  * 4) or await fetch_weather(),
             "sports_us": _get("sports_us", TTL_SPORTS   * 4) or await fetch_sports_us(),
+            "sports_f1": _get("sports_f1", TTL_SPORTS   * 4) or await fetch_sports_f1(),
             "calendar":  _get("calendar",  TTL_CALENDAR * 4) or await fetch_calendar(),
         }
         _set("main", combined)
@@ -566,21 +615,25 @@ def _build_error_image(message: str = "Render error — retrying next cycle") ->
 
 @app.on_event("startup")
 async def startup():
-    scheduler.add_job(refresh_ha,            "interval", seconds=TTL_HA,      id="ha")
-    scheduler.add_job(refresh_weather,       "interval", seconds=TTL_WEATHER,  id="weather")
-    scheduler.add_job(refresh_sports_f1,     "interval", seconds=TTL_SPORTS,   id="sports_f1")
-    scheduler.add_job(refresh_sports_us,     "interval", seconds=TTL_SPORTS,   id="sports_us")
-    scheduler.add_job(refresh_sports_soccer, "interval", seconds=TTL_SPORTS,   id="sports_soccer")
-    scheduler.add_job(refresh_calendar,      "interval", seconds=TTL_CALENDAR, id="calendar")
-    scheduler.add_job(refresh_main,          "interval", seconds=TTL_MAIN,     id="main")
+    scheduler.add_job(refresh_ha,             "interval", seconds=TTL_HA,      id="ha")
+    scheduler.add_job(refresh_weather,        "interval", seconds=TTL_WEATHER,  id="weather")
+    scheduler.add_job(refresh_sports_f1,      "interval", seconds=TTL_SPORTS,   id="sports_f1")
+    scheduler.add_job(refresh_sports_us,      "interval", seconds=TTL_SPORTS,   id="sports_us")
+    scheduler.add_job(refresh_sports_soccer,  "interval", seconds=TTL_SPORTS,   id="sports_soccer")
+    scheduler.add_job(refresh_sports_all,     "interval", seconds=TTL_SPORTS,   id="sports_all")
+    scheduler.add_job(refresh_calendar,       "interval", seconds=TTL_CALENDAR, id="calendar")
+    scheduler.add_job(refresh_main,           "interval", seconds=TTL_MAIN,     id="main")
+    scheduler.add_job(pre_render_all_screens, "interval", seconds=600,          id="pre_render")
     scheduler.start()
 
     # Warm caches on boot
     await refresh_weather()
     await asyncio.gather(refresh_sports_f1(), refresh_sports_us(), refresh_sports_soccer())
+    await refresh_sports_all()
     await refresh_calendar()
     await refresh_main()
     await refresh_ha()
+    await pre_render_all_screens()
 
     try:
         _static_images["welcome.png"] = _build_welcome_image()
@@ -613,7 +666,8 @@ def _base_url(request: Request) -> str:
 async def health():
     return {
         "status": "ok",
-        "cache_ages": {k: _age(k) for k in ["ha", "weather", "sports_f1", "sports_us", "sports_soccer", "calendar"]},
+        "cache_ages": {k: _age(k) for k in ["ha", "weather", "sports_f1", "sports_us", "sports_soccer", "sports_all", "calendar"]},
+        "pre_rendered_screens": list(_pre_render_cache.keys()),
         "server_base_url": SERVER_BASE_URL or "(auto from Host header)",
     }
 
@@ -648,13 +702,15 @@ async def data_main():
 @app.post("/refresh/{source}")
 async def manual_refresh(source: str):
     refreshers = {
-        "ha":            refresh_ha,
-        "weather":       refresh_weather,
-        "sports_f1":     refresh_sports_f1,
-        "sports_us":     refresh_sports_us,
-        "sports_soccer": refresh_sports_soccer,
-        "calendar":      refresh_calendar,
-        "main":          refresh_main,
+        "ha":           refresh_ha,
+        "weather":      refresh_weather,
+        "sports_f1":    refresh_sports_f1,
+        "sports_us":    refresh_sports_us,
+        "sports_soccer":refresh_sports_soccer,
+        "sports_all":   refresh_sports_all,
+        "calendar":     refresh_calendar,
+        "main":         refresh_main,
+        "pre_render":   pre_render_all_screens,
     }
     if source not in refreshers:
         raise HTTPException(404, f"Unknown source: {source}. Valid: {list(refreshers)}")
@@ -719,16 +775,23 @@ async def trmnl_display(request: Request):
 
     base_url = _base_url(request)
 
-    try:
-        img = render_screen(screen, data)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        img_bytes = buf.getvalue()
-        filename = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
-    except Exception as e:
-        log.error(f"Render failed for {screen}: {e}")
-        filename = "error.png"
-        img_bytes = _static_images.get("error.png") or _build_error_image(str(e)[:80])
+    pre_rendered = _pre_render_cache.get(screen)
+    if pre_rendered:
+        img_bytes = pre_rendered
+        filename  = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
+        log.debug(f"Serving pre-rendered {screen}")
+    else:
+        log.info(f"No pre-render for {screen}, rendering on demand")
+        try:
+            img = render_screen(screen, data)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            img_bytes = buf.getvalue()
+            filename  = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
+        except Exception as e:
+            log.error(f"Render failed for {screen}: {e}")
+            filename  = "error.png"
+            img_bytes = _static_images.get("error.png") or _build_error_image(str(e)[:80])
 
     _image_cache[filename] = img_bytes
 
