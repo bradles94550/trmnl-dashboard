@@ -399,14 +399,14 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
 
     if "error" in data:
         draw.text((40, y + 20), "Calendar unavailable", font=_font(56), fill=FG)
-        _footer(draw, "Configure ICAL_URL in .env")
+        _footer(draw, "Calendar sync pending — check calendar-sync.py on Mac Mini")
         return img
 
     events = data.get("events", [])
     if not events:
         draw.text((40, y + 40), "No upcoming events", font=_font(60), fill=FG)
         draw.text((40, y + 120), "in the next 14 days", font=_font(44), fill=DARK)
-        _footer(draw, "Configure ICAL_URL in .env")
+        _footer(draw, "Calendar sync pending — check calendar-sync.py on Mac Mini")
         return img
 
     f_date_header = _font(44)

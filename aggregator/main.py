@@ -8,6 +8,7 @@ APScheduler refreshes data caches on configurable TTLs.
 import asyncio
 import hashlib
 import io
+import json
 import os
 import time
 import logging
@@ -56,6 +57,10 @@ TRMNL_ACCESS_TOKEN = os.getenv("TRMNL_ACCESS_TOKEN", "")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").rstrip("/")
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
+
+# Apple Calendar JSON feed (synced from Mac Mini every 15 min by calendar-sync.py)
+APPLE_CAL_JSON_PATH = "/data/calendar-events.json"
+APPLE_CAL_MAX_AGE   = 1800  # 30 minutes; fall back to iCal if staler than this
 
 # Playlist rotation: screens cycle in this order
 PLAYLIST = ["main", "ha", "weather", "sports_all", "calendar"]
@@ -439,8 +444,25 @@ async def fetch_sports_soccer() -> dict:
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 async def fetch_calendar() -> dict:
+    # ── Primary: Apple Calendar JSON synced from Mac Mini ─────────────────────
+    try:
+        if os.path.exists(APPLE_CAL_JSON_PATH):
+            age = time.time() - os.stat(APPLE_CAL_JSON_PATH).st_mtime
+            if age < APPLE_CAL_MAX_AGE:
+                with open(APPLE_CAL_JSON_PATH) as f:
+                    data = json.load(f)
+                log.info(f"Using Apple Calendar JSON (age {int(age)}s, {len(data.get('events', []))} events)")
+                return data
+            else:
+                log.warning(f"Apple Calendar JSON is stale ({int(age)}s), falling back to iCal")
+        else:
+            log.info("Apple Calendar JSON not found, falling back to iCal")
+    except Exception as e:
+        log.warning(f"Apple Calendar JSON read error: {e}, falling back to iCal")
+
+    # ── Fallback: iCal URL fetching ────────────────────────────────────────────
     if not ICAL_URLS:
-        return {"error": "ICAL_URL not configured", "events": []}
+        return {"error": "No calendar source available (JSON missing/stale, ICAL_URL not set)", "events": []}
 
     now = datetime.now(timezone.utc)
     window_end = now + timedelta(days=14)
