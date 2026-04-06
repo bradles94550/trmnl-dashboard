@@ -16,6 +16,15 @@ from pathlib import Path
 
 SKIP_CALENDARS = {"Siri Suggestions", "Scheduled Reminders"}
 DAYS_AHEAD = 14
+
+# De La Salle calendar filtering: only keep events matching these keywords
+# (case-insensitive). All other DLS events (sports, games, etc.) are suppressed.
+DLS_CALENDAR_PATTERN = "de la salle"   # matched case-insensitively against calendar name
+DLS_ALLOWED_KEYWORDS = [
+    "break", "retreat", "holiday", "vacation", "closure",
+    "no school", "day off", "professional development", "pd day",
+    "faculty", "staff", "in-service",
+]
 OUTPUT_FILE = Path.home() / "trmnl" / "calendar-events.json"
 DEEPTHOUGHT_DEST = "deepthought:~/trmnl/calendar-events.json"
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -169,6 +178,12 @@ def parse_cal_rows(raw: str, cal_name: str) -> list[dict]:
         end_str   = parts[2].strip()
         all_day   = parts[3].strip() == "1"
         location  = parts[4].strip() if len(parts) > 4 and parts[4].strip() else None
+
+        # De La Salle calendar: only show breaks/retreats — suppress sports events
+        if DLS_CALENDAR_PATTERN in cal_name.lower():
+            summary_lc = summary.lower()
+            if not any(kw in summary_lc for kw in DLS_ALLOWED_KEYWORDS):
+                continue
 
         try:
             start_naive = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S")
