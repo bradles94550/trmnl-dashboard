@@ -63,7 +63,7 @@ APPLE_CAL_JSON_PATH = "/data/calendar-events.json"
 APPLE_CAL_MAX_AGE   = 1800  # 30 minutes; fall back to iCal if staler than this
 
 # Playlist rotation: screens cycle in this order
-PLAYLIST = ["main", "ha", "weather", "sports_all", "calendar"]
+PLAYLIST = ["main", "weather", "sports_all", "calendar", "ha"]
 
 TTL_HA       = int(os.getenv("CACHE_TTL_HA",       "300"))
 TTL_CALENDAR = int(os.getenv("CACHE_TTL_CALENDAR", "900"))
@@ -101,6 +101,21 @@ def _get(key: str, ttl: int) -> Any | None:
     if entry and (time.time() - entry["ts"]) < ttl:
         return entry["data"]
     return None
+
+
+def _data_hash(data: Any) -> str:
+    """Stable content hash for filename — excludes volatile timestamp fields."""
+    def _strip(d: Any) -> Any:
+        if isinstance(d, dict):
+            return {k: _strip(v) for k, v in d.items()
+                    if k not in ("fetched_at", "ts", "last_changed")}
+        if isinstance(d, list):
+            return [_strip(x) for x in d]
+        return d
+    cleaned = _strip(data)
+    return hashlib.md5(
+        json.dumps(cleaned, sort_keys=True, default=str).encode()
+    ).hexdigest()[:8]
 
 def _age(key: str) -> str:
     entry = _cache.get(key)
@@ -797,10 +812,20 @@ async def trmnl_display(request: Request):
 
     base_url = _base_url(request)
 
+    # Compute a stable filename: changes only when data content changes OR every
+    # 5-min slot boundary — prevents TRMNL blank-screen re-download on every
+    # button press while still delivering fresh images when data changes.
+    slot = int(time.time()) // 300  # 5-minute buckets
+    slot_hash = hashlib.md5(f"{screen}-{_data_hash(data)}-{slot}".encode()).hexdigest()[:8]
+    filename = f"{screen}-{slot_hash}.png"
+
     pre_rendered = _pre_render_cache.get(screen)
-    if pre_rendered:
+    if pre_rendered and filename in _image_cache:
+        # Same content + same slot: device already has this; no re-download needed
         img_bytes = pre_rendered
-        filename  = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
+        log.debug(f"Serving cached {screen} (stable filename)")
+    elif pre_rendered:
+        img_bytes = pre_rendered
         log.debug(f"Serving pre-rendered {screen}")
     else:
         log.info(f"No pre-render for {screen}, rendering on demand")
@@ -809,7 +834,6 @@ async def trmnl_display(request: Request):
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             img_bytes = buf.getvalue()
-            filename  = f"{screen}-{hashlib.md5(img_bytes).hexdigest()[:8]}.png"
         except Exception as e:
             log.error(f"Render failed for {screen}: {e}")
             filename  = "error.png"
@@ -829,7 +853,7 @@ async def trmnl_display(request: Request):
         "status": 0,
         "image_url": image_url,
         "filename": filename,
-        "refresh_rate": ttl,
+        "refresh_rate": 86400,  # no auto-rotation; device stays until button press
         "update_firmware": False,
         "firmware_url": "",
         "reset_firmware": False,

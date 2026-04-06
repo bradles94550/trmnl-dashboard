@@ -26,7 +26,7 @@ DARK   = 64    # dark gray — renders black after 1-bit conversion
 HEADER_H    = 120
 FOOTER_H    = 50
 CONTENT_Y   = HEADER_H + 10
-CONTENT_MAX_Y = HEIGHT - FOOTER_H - 10
+CONTENT_MAX_Y = HEIGHT - 10  # footers removed; use full height
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -47,6 +47,39 @@ def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.Im
             return ImageFont.truetype(path, size)
     return ImageFont.load_default()
 
+
+
+# ── Weather icons (Unicode — e-ink safe, in DejaVu Sans) ───────────────────
+_WEATHER_ICON: dict[str, str] = {
+    "Clear":                   "☀",
+    "Mainly Clear":            "☀",
+    "Partly Cloudy":           "⛅",
+    "Overcast":                "☁",
+    "Foggy":                   "≡",
+    "Icy Fog":                 "≡",
+    "Light Drizzle":           "☂",
+    "Drizzle":                 "☂",
+    "Heavy Drizzle":           "☂",
+    "Light Rain":              "☂",
+    "Rain":                    "☂",
+    "Heavy Rain":              "☂",
+    "Light Snow":              "❄",
+    "Snow":                    "❄",
+    "Heavy Snow":              "❄",
+    "Snow Grains":             "❄",
+    "Showers":                 "☂",
+    "Heavy Showers":           "☂",
+    "Violent Showers":         "☂",
+    "Snow Showers":            "❄",
+    "Heavy Snow Showers":      "❄",
+    "Thunderstorm":            "⚡",
+    "Thunderstorm+Hail":       "⚡",
+    "Thunderstorm+Heavy Hail": "⚡",
+}
+
+
+def _weather_icon(condition: str) -> str:
+    return _WEATHER_ICON.get(condition, "?")
 
 def _new_canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
     img = Image.new("L", (WIDTH, HEIGHT), BG)
@@ -84,6 +117,24 @@ def _section_bar(draw: ImageDraw.ImageDraw, y: int, text: str, font_size: int = 
     return y + h + 8
 
 
+
+def _has_upcoming_in_days(games: list[dict], days: int = 14) -> bool:
+    """Return True if any game starts within `days` days from now."""
+    from datetime import datetime, timezone, timedelta
+    now    = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=days)
+    for g in games:
+        date_iso = g.get("date_iso", "")
+        if not date_iso:
+            continue
+        try:
+            dt = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
+            if dt <= cutoff:
+                return True
+        except Exception:
+            pass
+    return False
+
 # ── HA Screen ─────────────────────────────────────────────────────────────────
 def render_ha(data: dict[str, Any]) -> Image.Image:
     img, draw = _new_canvas()
@@ -92,7 +143,6 @@ def render_ha(data: dict[str, Any]) -> Image.Image:
     if "error" in data:
         draw.text((40, y + 20), "HA not configured", font=_font(56), fill=FG)
         draw.text((40, y + 100), "Set HA_TOKEN in .env", font=_font(40), fill=DARK)
-        _footer(draw, "Home Assistant")
         return img
 
     summary = data.get("summary", {})
@@ -136,7 +186,6 @@ def render_ha(data: dict[str, Any]) -> Image.Image:
         line  = f"{name}: {state}{(' ' + unit) if unit else ''}".strip()
         draw.text((x, ey), line, font=f_entity, fill=FG)
 
-    _footer(draw, f"Home Assistant  \u2022  {data.get('fetched_at', '')[:16]}Z")
     return img
 
 
@@ -147,7 +196,6 @@ def render_weather(data: dict[str, Any]) -> Image.Image:
 
     if "error" in data:
         draw.text((40, y + 20), "Weather unavailable", font=_font(56), fill=FG)
-        _footer(draw, "Open-Meteo")
         return img
 
     cur   = data.get("current", {})
@@ -168,16 +216,15 @@ def render_weather(data: dict[str, Any]) -> Image.Image:
 
     forecast = data.get("forecast", [])[:5]
     if not forecast:
-        _footer(draw, f"Open-Meteo  \u2022  {data.get('fetched_at', '')[:16]}Z")
         return img
 
-    f_day  = _font(48)
-    f_temp = _font(56)
-    f_cond = _font(36)
+    f_day  = _font(60)
+    f_temp = _font(64)
+    f_cond = _font(60)
     col_w  = WIDTH // len(forecast)
 
     for i, day in enumerate(forecast):
-        x       = i * col_w + 20
+        col_cx  = i * col_w + col_w // 2   # column center x
         date_str = day.get("date", "")
         try:
             label = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a %-d")
@@ -185,21 +232,27 @@ def render_weather(data: dict[str, Any]) -> Image.Image:
             label = date_str[:6]
         hi     = day.get("high", "--")
         lo     = day.get("low", "--")
-        cond_d = day.get("condition", "")[:12]
+        icon   = _weather_icon(day.get("condition", ""))
         precip = day.get("precip_in", 0)
 
         if i > 0:
-            draw.line([x - 20, y2, x - 20, CONTENT_MAX_Y], fill=FG, width=2)
+            draw.line([i * col_w, y2, i * col_w, CONTENT_MAX_Y], fill=FG, width=2)
 
-        draw.text((x, y2), label, font=f_day, fill=FG)
-        hi_str = str(int(hi)) if isinstance(hi, float) else str(hi)
-        lo_str = str(int(lo)) if isinstance(lo, float) else str(lo)
-        draw.text((x, y2 + 60),  f"{hi_str}\u00b0/{lo_str}\u00b0", font=f_temp, fill=FG)
-        draw.text((x, y2 + 128), cond_d, font=f_cond, fill=DARK)
-        if isinstance(precip, (int, float)) and precip > 0.01:
-            draw.text((x, y2 + 174), f"Rain {precip:.2f}\"", font=f_cond, fill=FG)
+        hi_str   = str(int(hi)) if isinstance(hi, float) else str(hi)
+        lo_str   = str(int(lo)) if isinstance(lo, float) else str(lo)
+        temp_str = f"{hi_str}\u00b0/{lo_str}\u00b0"
+        prec_str = f"\u2614 {precip:.2f}\"" if isinstance(precip, (int, float)) and precip > 0.01 else ""
 
-    _footer(draw, f"Open-Meteo  \u2022  {data.get('fetched_at', '')[:16]}Z")
+        def _mid(text, font, cx=col_cx):
+            w = draw.textbbox((0, 0), text, font=font)[2]
+            return cx - w // 2
+
+        draw.text((_mid(label,    f_day),  y2),       label,    font=f_day,  fill=FG)
+        draw.text((_mid(temp_str, f_temp), y2 + 76),  temp_str, font=f_temp, fill=FG)
+        draw.text((_mid(icon,     f_cond), y2 + 158), icon,     font=f_cond, fill=DARK)
+        if prec_str:
+            draw.text((_mid(prec_str, f_cond), y2 + 228), prec_str, font=f_cond, fill=FG)
+
     return img
 
 
@@ -212,7 +265,6 @@ def render_sports_f1(data: dict[str, Any]) -> Image.Image:
 
     if "error" in data and not data.get("sessions"):
         draw.text((40, y + 40), data.get("error", "No data"), font=_font(56), fill=FG)
-        _footer(draw, "Jolpica F1 API")
         return img
 
     # Race name banner
@@ -223,7 +275,6 @@ def render_sports_f1(data: dict[str, Any]) -> Image.Image:
     sessions = data.get("sessions", [])
     if not sessions:
         draw.text((40, y + 30), "No sessions found", font=_font(56), fill=DARK)
-        _footer(draw, "Jolpica F1 API")
         return img
 
     # Column positions
@@ -264,7 +315,6 @@ def render_sports_f1(data: dict[str, Any]) -> Image.Image:
         y += row_h
         draw.line([0, y - 4, WIDTH, y - 4], fill=128, width=1)
 
-    _footer(draw, f"Formula 1  \u2022  {data.get('fetched_at', '')[:16]}Z")
     return img
 
 
@@ -338,7 +388,6 @@ def render_sports_us(data: dict[str, Any]) -> Image.Image:
                       font=f_detail, fill=DARK)
             y += 72
 
-    _footer(draw, f"ESPN  \u2022  {data.get('fetched_at', '')[:16]}Z")
     return img
 
 
@@ -388,7 +437,6 @@ def render_sports_soccer(data: dict[str, Any]) -> Image.Image:
         if y < CONTENT_MAX_Y - 80:
             y = _divider(draw, y + 4, width=2)
 
-    _footer(draw, f"ESPN  \u2022  {data.get('fetched_at', '')[:16]}Z")
     return img
 
 
@@ -399,14 +447,12 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
 
     if "error" in data:
         draw.text((40, y + 20), "Calendar unavailable", font=_font(56), fill=FG)
-        _footer(draw, "Calendar sync pending — check calendar-sync.py on Mac Mini")
         return img
 
     events = data.get("events", [])
     if not events:
         draw.text((40, y + 40), "No upcoming events", font=_font(60), fill=FG)
         draw.text((40, y + 120), "in the next 14 days", font=_font(44), fill=DARK)
-        _footer(draw, "Calendar sync pending — check calendar-sync.py on Mac Mini")
         return img
 
     f_date_header = _font(44)
@@ -451,26 +497,11 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
             draw.text((160, y), f"\u25cb {cal_label[:32]}", font=f_loc, fill=DARK)
             y += 40
 
-    _footer(draw, f"Calendar  \u2022  {data.get('fetched_at', '')[:16]}Z")
     return img
 
 
 
 
-_WEATHER_ABBR: dict[str, str] = {
-    "Clear": "SUN",   "Mainly Clear": "SUN",  "Partly Cloudy": "PTLY",
-    "Overcast": "CLDY", "Foggy": "FOG",        "Icy Fog": "FOG",
-    "Light Drizzle": "DRIZ", "Drizzle": "DRIZ", "Heavy Drizzle": "DRIZ",
-    "Light Rain": "RAIN",   "Rain": "RAIN",    "Heavy Rain": "RAIN",
-    "Light Snow": "SNOW",   "Snow": "SNOW",    "Heavy Snow": "SNOW",
-    "Snow Grains": "SNOW",  "Showers": "SHWR", "Heavy Showers": "SHWR",
-    "Violent Showers": "SHWR", "Snow Showers": "SNOW", "Heavy Snow Showers": "SNOW",
-    "Thunderstorm": "TSTM", "Thunderstorm+Hail": "TSTM", "Thunderstorm+Heavy Hail": "TSTM",
-}
-
-
-def _weather_abbr(condition: str) -> str:
-    return _WEATHER_ABBR.get(condition, condition[:4].upper())
 
 
 # ── Main Dashboard Screen ──────────────────────────────────────────────────────
@@ -479,11 +510,13 @@ def render_main(data: dict[str, Any]) -> Image.Image:
 
     img, draw = _new_canvas()
 
-    BORDER  = 3
-    PAD     = 14
-    HDR_H   = 56
-    SPLIT_X = 920   # left/right vertical divide
-    SPLIT_Y = 730   # top/bottom horizontal divide
+    BORDER     = 3
+    PAD        = 14
+    HDR_H      = 56
+    TITLE_PAD  = 24   # breathing room between title bar and content panels
+    CONTENT_Y0 = HDR_H + TITLE_PAD
+    SPLIT_X    = 920   # left/right vertical divide
+    SPLIT_Y    = 730   # top/bottom horizontal divide
 
     # ── Header bar ────────────────────────────────────────────────────────────
     draw.rectangle([0, 0, WIDTH, HDR_H], fill=FG)
@@ -494,9 +527,9 @@ def render_main(data: dict[str, Any]) -> Image.Image:
     draw.text((WIDTH - ts_w - 20, 9), ts, font=f_hdr, fill=BG)
 
     # ── Section borders ───────────────────────────────────────────────────────
-    draw.rectangle([0,        HDR_H, SPLIT_X,     SPLIT_Y],     outline=FG, width=BORDER)
-    draw.rectangle([SPLIT_X,  HDR_H, WIDTH - 1,   SPLIT_Y],     outline=FG, width=BORDER)
-    draw.rectangle([0,        SPLIT_Y, WIDTH - 1,  HEIGHT - 1], outline=FG, width=BORDER)
+    draw.rectangle([0,        CONTENT_Y0, SPLIT_X,     SPLIT_Y],     outline=FG, width=BORDER)
+    draw.rectangle([SPLIT_X,  CONTENT_Y0, WIDTH - 1,   SPLIT_Y],     outline=FG, width=BORDER)
+    draw.rectangle([0,        SPLIT_Y,    WIDTH - 1,   HEIGHT - 1],  outline=FG, width=BORDER)
 
     f_sec  = _font(34)
     f_team = _font(36)
@@ -508,58 +541,51 @@ def render_main(data: dict[str, Any]) -> Image.Image:
     s_right       = SPLIT_X - BORDER - PAD
     sports_bottom = SPLIT_Y - BORDER - 8
 
-    draw.rectangle([BORDER, HDR_H + BORDER, SPLIT_X - BORDER, HDR_H + BORDER + 42], fill=DARK)
-    draw.text((s_left, HDR_H + BORDER + 4), "PRO SPORTS SCHEDULE", font=f_sec, fill=BG)
-    sy = HDR_H + BORDER + 50
+    draw.rectangle([BORDER, CONTENT_Y0 + BORDER, SPLIT_X - BORDER, CONTENT_Y0 + BORDER + 42], fill=DARK)
+    draw.text((s_left, CONTENT_Y0 + BORDER + 4), "PRO SPORTS SCHEDULE", font=f_sec, fill=BG)
+    sy = CONTENT_Y0 + BORDER + 50
 
-    # Giants
-    if sy + 40 < sports_bottom:
+    # Giants — only if games within 14 days
+    series_list     = sports.get("giants", {}).get("series", [])
+    giant_games_flat = [g for s in series_list for g in s.get("games", [])]
+    if giant_games_flat and _has_upcoming_in_days(giant_games_flat, 14) and sy + 40 < sports_bottom:
         draw.text((s_left, sy), "SF Giants", font=f_team, fill=FG)
         sy += 42
-        series_list = sports.get("giants", {}).get("series", [])
-        if not series_list:
-            draw.text((s_left + 16, sy), "No upcoming games", font=f_game, fill=DARK)
+        for series in series_list[:2]:
+            if sy + 34 > sports_bottom - 120:
+                break
+            venue = series.get("venue_flag", "vs")
+            opp   = series.get("opponent", "")[:16]
+            n     = series.get("num_games", 0)
+            draw.text((s_left + 8, sy), f"{venue} {opp}  ({n}G)", font=f_game, fill=FG)
             sy += 34
-        else:
-            for series in series_list[:2]:
-                if sy + 34 > sports_bottom - 120:
+            for game in series.get("games", [])[:3]:
+                if sy + 30 > sports_bottom - 120:
                     break
-                venue = series.get("venue_flag", "vs")
-                opp   = series.get("opponent", "")[:16]
-                n     = series.get("num_games", 0)
-                draw.text((s_left + 8, sy), f"{venue} {opp}  ({n}G)", font=f_game, fill=FG)
-                sy += 34
-                for game in series.get("games", [])[:3]:
-                    if sy + 30 > sports_bottom - 120:
-                        break
-                    draw.text((s_left + 28, sy),
-                              f"{game.get('display_date','')}  {game.get('display_time','')}",
-                              font=f_game, fill=DARK)
-                    sy += 30
-                sy += 4
+                draw.text((s_left + 28, sy),
+                          f"{game.get('display_date','')}  {game.get('display_time','')}",
+                          font=f_game, fill=DARK)
+                sy += 30
+            sy += 4
 
     # Thin divider between teams
     if sy + 12 < sports_bottom - 80:
         draw.line([s_left, sy + 4, s_right, sy + 4], fill=128, width=1)
         sy += 14
 
-    # 49ers
-    if sy + 40 < sports_bottom:
+    # 49ers — only if games within 14 days
+    niner_games = sports.get("niners", {}).get("games", [])
+    if niner_games and _has_upcoming_in_days(niner_games, 14) and sy + 40 < sports_bottom:
         draw.text((s_left, sy), "SF 49ers", font=f_team, fill=FG)
         sy += 42
-        niner_games = sports.get("niners", {}).get("games", [])
-        if not niner_games:
-            draw.text((s_left + 16, sy), "Off-season -- no upcoming games", font=f_game, fill=DARK)
+        for game in niner_games[:5]:
+            if sy + 34 > sports_bottom:
+                break
+            venue = game.get("venue_flag", "vs")
+            opp   = game.get("opponent", "")[:14]
+            dt    = f"{game.get('display_date','')}  {game.get('display_time','')}"
+            draw.text((s_left + 8, sy), f"{venue} {opp}  {dt}", font=f_game, fill=FG)
             sy += 34
-        else:
-            for game in niner_games[:5]:
-                if sy + 34 > sports_bottom:
-                    break
-                venue = game.get("venue_flag", "vs")
-                opp   = game.get("opponent", "")[:14]
-                dt    = f"{game.get('display_date','')}  {game.get('display_time','')}"
-                draw.text((s_left + 8, sy), f"{venue} {opp}  {dt}", font=f_game, fill=FG)
-                sy += 34
 
     # ── F1 next race in sports panel ─────────────────────────────────────────────
     if sy + 12 < sports_bottom - 60:
@@ -587,9 +613,9 @@ def render_main(data: dict[str, Any]) -> Image.Image:
     weather_right  = WIDTH - BORDER - PAD
     weather_bottom = SPLIT_Y - BORDER - 8
 
-    draw.rectangle([SPLIT_X + BORDER, HDR_H + BORDER, WIDTH - BORDER - 1, HDR_H + BORDER + 42], fill=DARK)
-    draw.text((wx0, HDR_H + BORDER + 4), "WEATHER  \u2014  Livermore", font=f_sec, fill=BG)
-    wy = HDR_H + BORDER + 50
+    draw.rectangle([SPLIT_X + BORDER, CONTENT_Y0 + BORDER, WIDTH - BORDER - 1, CONTENT_Y0 + BORDER + 42], fill=DARK)
+    draw.text((wx0, CONTENT_Y0 + BORDER + 4), "WEATHER  \u2014  Livermore", font=f_sec, fill=BG)
+    wy = CONTENT_Y0 + BORDER + 50
 
     if "error" not in weather:
         cur   = weather.get("current", {})
@@ -613,17 +639,15 @@ def render_main(data: dict[str, Any]) -> Image.Image:
         draw.line([wx0, wy, weather_right, wy], fill=FG, width=2)
         wy += 14
 
-        # 5-day forecast table
+        # 5-day forecast — center-justified within the weather panel
         forecast = weather.get("forecast", [])[:5]
-        f_day = _font(38)
-        f_hi  = _font(42)
-        f_ico = _font(36, bold=False)
-        C_DAY  = wx0
-        C_HI   = wx0 + 130
-        C_ICON = wx0 + 270
+        f_day  = _font(38)
+        f_hi   = _font(42)
+        f_ico  = _font(44)
+        panel_cx = (SPLIT_X + WIDTH) // 2  # horizontal center of weather panel
 
         for day in forecast:
-            if wy + 50 > weather_bottom:
+            if wy + 54 > weather_bottom:
                 break
             date_str = day.get("date", "")
             try:
@@ -632,15 +656,21 @@ def render_main(data: dict[str, Any]) -> Image.Image:
                 day_lbl = date_str[:3]
             hi     = day.get("high", "--")
             hi_s   = f"{int(hi)}\u00b0" if isinstance(hi, (int, float)) else str(hi)
-            icon   = f"[{_weather_abbr(day.get('condition', ''))}]"
+            icon   = _weather_icon(day.get("condition", ""))
             precip = day.get("precip_in", 0)
             if isinstance(precip, (int, float)) and precip > 0.05:
-                icon += " \u2614"  # umbrella char
+                icon += "\u2614"
 
-            draw.text((C_DAY,  wy),     day_lbl, font=f_day, fill=FG)
-            draw.text((C_HI,   wy - 4), hi_s,    font=f_hi,  fill=FG)
-            draw.text((C_ICON, wy + 4), icon,     font=f_ico, fill=DARK)
-            wy += 50
+            w_day = draw.textbbox((0, 0), day_lbl, font=f_day)[2]
+            w_hi  = draw.textbbox((0, 0), hi_s,    font=f_hi)[2]
+            w_ico = draw.textbbox((0, 0), icon,     font=f_ico)[2]
+            GAP   = 16
+            total = w_day + GAP + w_hi + GAP + w_ico
+            rx    = panel_cx - total // 2
+            draw.text((rx,                        wy),     day_lbl, font=f_day, fill=FG)
+            draw.text((rx + w_day + GAP,          wy - 4), hi_s,   font=f_hi,  fill=FG)
+            draw.text((rx + w_day + GAP + w_hi + GAP, wy + 2), icon, font=f_ico, fill=DARK)
+            wy += 54
     else:
         draw.text((wx0, wy + 20), "Weather unavailable", font=_font(46), fill=DARK)
 
@@ -732,15 +762,13 @@ def render_sports_all(data: dict[str, Any]) -> Image.Image:
     f_team   = _font(48)
     f_detail = _font(40, bold=False)
 
-    # ── Giants ────────────────────────────────────────────────────────────────
-    giants = data.get("giants", {})
-    y = _section_bar(draw, y, "SF Giants  \u26be", font_size=40)
-    series_list = giants.get("series", [])
-    if not series_list:
-        draw.text((40, y + 8), "No upcoming games", font=f_detail, fill=DARK)
-        y += 52
-    else:
-        for series in series_list[:1]:
+    # ── Giants — skip if no games within 14 days ─────────────────────────────
+    giants      = data.get("giants", {})
+    giants_ser  = giants.get("series", [])
+    giants_flat = [g for s in giants_ser for g in s.get("games", [])]
+    if giants_flat and _has_upcoming_in_days(giants_flat, 14):
+        y = _section_bar(draw, y, "SF Giants  \u26be", font_size=40)
+        for series in giants_ser[:1]:
             venue = series.get("venue_flag", "vs")
             opp   = series.get("opponent", "")[:22]
             n     = series.get("num_games", 0)
@@ -752,17 +780,14 @@ def render_sports_all(data: dict[str, Any]) -> Image.Image:
                 draw.text((72, y), f"{game['display_date']}  {game['display_time']}", font=f_detail, fill=DARK)
                 y += 44
             y += 4
-    draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
-    y += 12
+        draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
+        y += 12
 
-    # ── 49ers ─────────────────────────────────────────────────────────────────
-    niners = data.get("niners", {})
-    y = _section_bar(draw, y, "SF 49ers  \U0001f3c8", font_size=40)
+    # ── 49ers — skip if no games within 14 days ──────────────────────────────
+    niners      = data.get("niners", {})
     niner_games = niners.get("games", [])
-    if not niner_games:
-        draw.text((40, y + 8), "Off-season \u2014 no upcoming games", font=f_detail, fill=DARK)
-        y += 52
-    else:
+    if niner_games and _has_upcoming_in_days(niner_games, 14):
+        y = _section_bar(draw, y, "SF 49ers  \U0001f3c8", font_size=40)
         for game in niner_games[:2]:
             if y + 52 > CONTENT_MAX_Y - 420:
                 break
@@ -771,8 +796,8 @@ def render_sports_all(data: dict[str, Any]) -> Image.Image:
             dt    = f"{game.get('display_date', '')}  {game.get('display_time', '')}"
             draw.text((40, y + 6), f"{venue} {opp}  {dt}", font=f_team, fill=FG)
             y += 52
-    draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
-    y += 12
+        draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
+        y += 12
 
     # ── Formula 1 ─────────────────────────────────────────────────────────────
     f1 = data.get("f1", {})
@@ -825,7 +850,6 @@ def render_sports_all(data: dict[str, Any]) -> Image.Image:
             draw.line([0, y + 2, WIDTH, y + 2], fill=128, width=1)
             y += 12
 
-    _footer(draw, f"ESPN / Jolpica F1  \u2022  {data.get('fetched_at', '')[:16]}Z")
     return img
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
