@@ -58,12 +58,13 @@ SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").rstrip("/")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
 # Playlist rotation: screens cycle in this order
-PLAYLIST = ["ha", "weather", "sports_f1", "sports_us", "sports_soccer", "calendar"]
+PLAYLIST = ["main", "ha", "weather", "sports_f1", "sports_us", "sports_soccer", "calendar"]
 
 TTL_HA       = int(os.getenv("CACHE_TTL_HA",       "300"))
 TTL_CALENDAR = int(os.getenv("CACHE_TTL_CALENDAR", "900"))
 TTL_WEATHER  = int(os.getenv("CACHE_TTL_WEATHER",  "1800"))
 TTL_SPORTS   = int(os.getenv("CACHE_TTL_SPORTS",   "1800"))
+TTL_MAIN     = int(os.getenv("CACHE_TTL_MAIN",     "900"))
 
 # F1 API (Jolpica — Ergast mirror)
 JOLPICA_F1_URL = "https://api.jolpi.ca/ergast/f1/current/next.json"
@@ -83,6 +84,7 @@ _SCREEN_CACHE: dict[str, tuple[str, int]] = {
     "sports_us":    ("sports_us",    TTL_SPORTS),
     "sports_soccer":("sports_soccer",TTL_SPORTS),
     "calendar":     ("calendar",     TTL_CALENDAR),
+    "main":         ("main",         TTL_MAIN),
 }
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
@@ -517,6 +519,18 @@ async def refresh_calendar():
     except Exception as e:
         log.error(f"Calendar refresh failed: {e}")
 
+async def refresh_main():
+    try:
+        combined = {
+            "weather":   _get("weather",   TTL_WEATHER  * 4) or await fetch_weather(),
+            "sports_us": _get("sports_us", TTL_SPORTS   * 4) or await fetch_sports_us(),
+            "calendar":  _get("calendar",  TTL_CALENDAR * 4) or await fetch_calendar(),
+        }
+        _set("main", combined)
+        log.info("Main dashboard cache refreshed")
+    except Exception as e:
+        log.error(f"Main refresh failed: {e}")
+
 
 scheduler = AsyncIOScheduler()
 
@@ -558,12 +572,14 @@ async def startup():
     scheduler.add_job(refresh_sports_us,     "interval", seconds=TTL_SPORTS,   id="sports_us")
     scheduler.add_job(refresh_sports_soccer, "interval", seconds=TTL_SPORTS,   id="sports_soccer")
     scheduler.add_job(refresh_calendar,      "interval", seconds=TTL_CALENDAR, id="calendar")
+    scheduler.add_job(refresh_main,          "interval", seconds=TTL_MAIN,     id="main")
     scheduler.start()
 
     # Warm caches on boot
     await refresh_weather()
     await asyncio.gather(refresh_sports_f1(), refresh_sports_us(), refresh_sports_soccer())
     await refresh_calendar()
+    await refresh_main()
     await refresh_ha()
 
     try:
@@ -625,6 +641,10 @@ async def data_sports_soccer():
 async def data_calendar():
     return _get("calendar", TTL_CALENDAR * 2) or await fetch_calendar()
 
+@app.get("/data/main")
+async def data_main():
+    return _get("main", TTL_MAIN * 2) or {}
+
 @app.post("/refresh/{source}")
 async def manual_refresh(source: str):
     refreshers = {
@@ -634,6 +654,7 @@ async def manual_refresh(source: str):
         "sports_us":     refresh_sports_us,
         "sports_soccer": refresh_sports_soccer,
         "calendar":      refresh_calendar,
+        "main":          refresh_main,
     }
     if source not in refreshers:
         raise HTTPException(404, f"Unknown source: {source}. Valid: {list(refreshers)}")

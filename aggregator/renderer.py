@@ -455,6 +455,254 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
     return img
 
 
+
+
+_WEATHER_ABBR: dict[str, str] = {
+    "Clear": "SUN",   "Mainly Clear": "SUN",  "Partly Cloudy": "PTLY",
+    "Overcast": "CLDY", "Foggy": "FOG",        "Icy Fog": "FOG",
+    "Light Drizzle": "DRIZ", "Drizzle": "DRIZ", "Heavy Drizzle": "DRIZ",
+    "Light Rain": "RAIN",   "Rain": "RAIN",    "Heavy Rain": "RAIN",
+    "Light Snow": "SNOW",   "Snow": "SNOW",    "Heavy Snow": "SNOW",
+    "Snow Grains": "SNOW",  "Showers": "SHWR", "Heavy Showers": "SHWR",
+    "Violent Showers": "SHWR", "Snow Showers": "SNOW", "Heavy Snow Showers": "SNOW",
+    "Thunderstorm": "TSTM", "Thunderstorm+Hail": "TSTM", "Thunderstorm+Heavy Hail": "TSTM",
+}
+
+
+def _weather_abbr(condition: str) -> str:
+    return _WEATHER_ABBR.get(condition, condition[:4].upper())
+
+
+# ── Main Dashboard Screen ──────────────────────────────────────────────────────
+def render_main(data: dict[str, Any]) -> Image.Image:
+    from datetime import timedelta  # noqa: F811
+
+    img, draw = _new_canvas()
+
+    BORDER  = 3
+    PAD     = 14
+    HDR_H   = 56
+    SPLIT_X = 920   # left/right vertical divide
+    SPLIT_Y = 730   # top/bottom horizontal divide
+
+    # ── Header bar ────────────────────────────────────────────────────────────
+    draw.rectangle([0, 0, WIDTH, HDR_H], fill=FG)
+    f_hdr = _font(38)
+    ts    = datetime.now().strftime("%a %b %-d  %-I:%M %p")
+    draw.text((20, 9), "FAMILY DASHBOARD", font=f_hdr, fill=BG)
+    ts_w  = draw.textbbox((0, 0), ts, font=f_hdr)[2]
+    draw.text((WIDTH - ts_w - 20, 9), ts, font=f_hdr, fill=BG)
+
+    # ── Section borders ───────────────────────────────────────────────────────
+    draw.rectangle([0,        HDR_H, SPLIT_X,     SPLIT_Y],     outline=FG, width=BORDER)
+    draw.rectangle([SPLIT_X,  HDR_H, WIDTH - 1,   SPLIT_Y],     outline=FG, width=BORDER)
+    draw.rectangle([0,        SPLIT_Y, WIDTH - 1,  HEIGHT - 1], outline=FG, width=BORDER)
+
+    f_sec  = _font(34)
+    f_team = _font(36)
+    f_game = _font(32, bold=False)
+
+    # ── Top Left: Pro Sports ──────────────────────────────────────────────────
+    sports        = data.get("sports_us", {})
+    s_left        = BORDER + PAD
+    s_right       = SPLIT_X - BORDER - PAD
+    sports_bottom = SPLIT_Y - BORDER - 8
+
+    draw.rectangle([BORDER, HDR_H + BORDER, SPLIT_X - BORDER, HDR_H + BORDER + 42], fill=DARK)
+    draw.text((s_left, HDR_H + BORDER + 4), "PRO SPORTS SCHEDULE", font=f_sec, fill=BG)
+    sy = HDR_H + BORDER + 50
+
+    # Giants
+    if sy + 40 < sports_bottom:
+        draw.text((s_left, sy), "SF Giants", font=f_team, fill=FG)
+        sy += 42
+        series_list = sports.get("giants", {}).get("series", [])
+        if not series_list:
+            draw.text((s_left + 16, sy), "No upcoming games", font=f_game, fill=DARK)
+            sy += 34
+        else:
+            for series in series_list[:2]:
+                if sy + 34 > sports_bottom - 120:
+                    break
+                venue = series.get("venue_flag", "vs")
+                opp   = series.get("opponent", "")[:16]
+                n     = series.get("num_games", 0)
+                draw.text((s_left + 8, sy), f"{venue} {opp}  ({n}G)", font=f_game, fill=FG)
+                sy += 34
+                for game in series.get("games", [])[:3]:
+                    if sy + 30 > sports_bottom - 120:
+                        break
+                    draw.text((s_left + 28, sy),
+                              f"{game.get('display_date','')}  {game.get('display_time','')}",
+                              font=f_game, fill=DARK)
+                    sy += 30
+                sy += 4
+
+    # Thin divider between teams
+    if sy + 12 < sports_bottom - 80:
+        draw.line([s_left, sy + 4, s_right, sy + 4], fill=128, width=1)
+        sy += 14
+
+    # 49ers
+    if sy + 40 < sports_bottom:
+        draw.text((s_left, sy), "SF 49ers", font=f_team, fill=FG)
+        sy += 42
+        niner_games = sports.get("niners", {}).get("games", [])
+        if not niner_games:
+            draw.text((s_left + 16, sy), "Off-season -- no upcoming games", font=f_game, fill=DARK)
+            sy += 34
+        else:
+            for game in niner_games[:5]:
+                if sy + 34 > sports_bottom:
+                    break
+                venue = game.get("venue_flag", "vs")
+                opp   = game.get("opponent", "")[:14]
+                dt    = f"{game.get('display_date','')}  {game.get('display_time','')}"
+                draw.text((s_left + 8, sy), f"{venue} {opp}  {dt}", font=f_game, fill=FG)
+                sy += 34
+
+    # ── Top Right: Weather ────────────────────────────────────────────────────
+    weather        = data.get("weather", {})
+    wx0            = SPLIT_X + BORDER + PAD
+    weather_right  = WIDTH - BORDER - PAD
+    weather_bottom = SPLIT_Y - BORDER - 8
+
+    draw.rectangle([SPLIT_X + BORDER, HDR_H + BORDER, WIDTH - BORDER - 1, HDR_H + BORDER + 42], fill=DARK)
+    draw.text((wx0, HDR_H + BORDER + 4), "WEATHER  \u2014  Livermore", font=f_sec, fill=BG)
+    wy = HDR_H + BORDER + 50
+
+    if "error" not in weather:
+        cur   = weather.get("current", {})
+        temp  = cur.get("temp_f",       "--")
+        cond  = cur.get("condition",    "")
+        feels = cur.get("feels_like_f", "--")
+        wind  = cur.get("wind_mph",     "--")
+
+        temp_str  = f"{int(temp)}\u00b0F"  if isinstance(temp,  (int, float)) else f"{temp}\u00b0F"
+        feels_str = f"{int(feels)}\u00b0"  if isinstance(feels, (int, float)) else str(feels)
+        wind_str  = f"{int(wind)} mph"     if isinstance(wind,  (int, float)) else str(wind)
+
+        draw.text((wx0, wy), temp_str, font=_font(130), fill=FG)
+        wy += 144
+        draw.text((wx0, wy), cond, font=_font(46), fill=FG)
+        wy += 56
+        draw.text((wx0, wy),
+                  f"Feels {feels_str}  \u2022  Wind {wind_str}",
+                  font=_font(34, bold=False), fill=DARK)
+        wy += 48
+        draw.line([wx0, wy, weather_right, wy], fill=FG, width=2)
+        wy += 14
+
+        # 5-day forecast table
+        forecast = weather.get("forecast", [])[:5]
+        f_day = _font(38)
+        f_hi  = _font(42)
+        f_ico = _font(36, bold=False)
+        C_DAY  = wx0
+        C_HI   = wx0 + 130
+        C_ICON = wx0 + 270
+
+        for day in forecast:
+            if wy + 50 > weather_bottom:
+                break
+            date_str = day.get("date", "")
+            try:
+                day_lbl = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a")
+            except ValueError:
+                day_lbl = date_str[:3]
+            hi     = day.get("high", "--")
+            hi_s   = f"{int(hi)}\u00b0" if isinstance(hi, (int, float)) else str(hi)
+            icon   = f"[{_weather_abbr(day.get('condition', ''))}]"
+            precip = day.get("precip_in", 0)
+            if isinstance(precip, (int, float)) and precip > 0.05:
+                icon += " \u2614"  # umbrella char
+
+            draw.text((C_DAY,  wy),     day_lbl, font=f_day, fill=FG)
+            draw.text((C_HI,   wy - 4), hi_s,    font=f_hi,  fill=FG)
+            draw.text((C_ICON, wy + 4), icon,     font=f_ico, fill=DARK)
+            wy += 50
+    else:
+        draw.text((wx0, wy + 20), "Weather unavailable", font=_font(46), fill=DARK)
+
+    # ── Bottom: Family Calendar (7 days, 2-column) ────────────────────────────
+    cal_data   = data.get("calendar", {})
+    events     = cal_data.get("events", [])
+    cal_bottom = HEIGHT - BORDER - 8
+
+    draw.rectangle([BORDER, SPLIT_Y + BORDER, WIDTH - BORDER - 1, SPLIT_Y + BORDER + 42], fill=DARK)
+    draw.text((BORDER + PAD, SPLIT_Y + BORDER + 4),
+              "FAMILY CALENDAR \u2014 NEXT 7 DAYS", font=f_sec, fill=BG)
+
+    cy_start = SPLIT_Y + BORDER + 52
+    f_dhdr   = _font(36)
+    f_evt    = _font(32, bold=False)
+
+    if not events:
+        draw.text((BORDER + PAD, cy_start + 16),
+                  "No events in the next 7 days", font=f_evt, fill=DARK)
+    else:
+        HALF     = WIDTH // 2
+        col_x    = [BORDER + PAD, HALF + PAD]
+        col_y    = [cy_start, cy_start]
+        cur_col  = 0
+        seen     : dict[int, str] = {}
+
+        for event in events[:40]:
+            if cur_col >= 2:
+                break
+            cx       = col_x[cur_col]
+            cy       = col_y[cur_col]
+            start    = event.get("start", "")
+            date_str = start[:10]
+            time_str = "" if event.get("all_day") else start[11:16]
+            summary  = event.get("summary", "")
+
+            # Date header
+            if date_str != seen.get(cur_col):
+                if cy + 40 > cal_bottom:
+                    cur_col += 1
+                    if cur_col >= 2:
+                        break
+                    cx, cy = col_x[cur_col], col_y[cur_col]
+                try:
+                    dlbl = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A, %b %-d")
+                except ValueError:
+                    dlbl = date_str
+                draw.rectangle([cx - 4, cy, cx + HALF - 28, cy + 36], fill=DARK)
+                draw.text((cx, cy + 2), dlbl, font=f_dhdr, fill=BG)
+                cy += 40
+                seen[cur_col] = date_str
+                col_y[cur_col] = cy
+
+            # Event row
+            if cy + 32 > cal_bottom:
+                cur_col += 1
+                if cur_col >= 2:
+                    break
+                cx, cy = col_x[cur_col], col_y[cur_col]
+                # Repeat date header in new column if needed
+                if date_str != seen.get(cur_col):
+                    try:
+                        dlbl = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A, %b %-d")
+                    except ValueError:
+                        dlbl = date_str
+                    draw.rectangle([cx - 4, cy, cx + HALF - 28, cy + 36], fill=DARK)
+                    draw.text((cx, cy + 2), dlbl, font=f_dhdr, fill=BG)
+                    cy += 40
+                    seen[cur_col] = date_str
+                    col_y[cur_col] = cy
+
+            if cy + 32 > cal_bottom:
+                break
+
+            time_lbl = time_str if time_str else "All day"
+            summ     = summary[:34]
+            draw.text((cx + 4, cy), f"{time_lbl}  {summ}", font=f_evt, fill=FG)
+            cy += 34
+            col_y[cur_col] = cy
+
+    return img
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 RENDERERS = {
     "ha":            render_ha,
@@ -463,6 +711,7 @@ RENDERERS = {
     "sports_us":     render_sports_us,
     "sports_soccer": render_sports_soccer,
     "calendar":      render_calendar,
+    "main":          render_main,
 }
 
 
