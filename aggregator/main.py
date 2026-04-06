@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from icalendar import Calendar
+import recurring_ical_events
 from dotenv import load_dotenv
 from renderer import render_screen
 
@@ -46,6 +47,10 @@ WEATHER_LON = float(os.getenv("WEATHER_LON", "-121.7721"))
 ICAL_URLS = [
     u.strip() for u in os.getenv("ICAL_URL", "").split(",")
     if u.strip() and u.strip() != "REPLACE_WITH_ICAL_URL"
+]
+ICAL_LABELS = [
+    l.strip() for l in os.getenv("ICAL_URL_LABELS", "").split(",")
+    if l.strip()
 ]
 TRMNL_ACCESS_TOKEN = os.getenv("TRMNL_ACCESS_TOKEN", "")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").rstrip("/")
@@ -423,40 +428,44 @@ async def fetch_calendar() -> dict:
     all_events = []
 
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        for url in ICAL_URLS:
+        for idx, raw_url in enumerate(ICAL_URLS):
+            # Convert webcal:// to https:// (Apple Calendar / iCloud uses webcal://)
+            url = raw_url.replace("webcal://", "https://")
+            cal_label = ICAL_LABELS[idx] if idx < len(ICAL_LABELS) else None
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 cal = Calendar.from_ical(resp.content)
-                for component in cal.walk():
-                    if component.name != "VEVENT":
-                        continue
+                # recurring_ical_events expands RRULE recurring events in the window
+                for component in recurring_ical_events.of(cal).between(now, window_end):
                     dtstart = component.get("DTSTART")
                     if not dtstart:
                         continue
                     start = dtstart.dt
-                    if not hasattr(start, "hour"):
+                    all_day = not hasattr(start, "hour")
+                    if all_day:
                         start = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
                     elif start.tzinfo is None:
                         start = start.replace(tzinfo=timezone.utc)
 
-                    if now <= start <= window_end:
-                        dtend = component.get("DTEND")
-                        end = dtend.dt if dtend else None
-                        if end and not hasattr(end, "hour"):
+                    dtend = component.get("DTEND")
+                    end = dtend.dt if dtend else None
+                    if end is not None:
+                        if not hasattr(end, "hour"):
                             end = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
-                        elif end and end.tzinfo is None:
+                        elif end.tzinfo is None:
                             end = end.replace(tzinfo=timezone.utc)
 
-                        all_events.append({
-                            "summary":  str(component.get("SUMMARY", "")),
-                            "start":    start.isoformat(),
-                            "end":      end.isoformat() if end else None,
-                            "location": str(component.get("LOCATION", "")) or None,
-                            "all_day":  not hasattr(dtstart.dt, "hour"),
-                        })
+                    all_events.append({
+                        "summary":  str(component.get("SUMMARY", "")),
+                        "start":    start.isoformat(),
+                        "end":      end.isoformat() if end else None,
+                        "location": str(component.get("LOCATION", "")) or None,
+                        "all_day":  all_day,
+                        "calendar": cal_label,
+                    })
             except Exception as e:
-                log.warning(f"Failed to fetch iCal {url}: {e}")
+                log.warning(f"Failed to fetch iCal {raw_url}: {e}")
 
     all_events.sort(key=lambda e: e["start"])
     return {

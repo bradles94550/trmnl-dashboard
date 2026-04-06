@@ -416,11 +416,12 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
 
     last_date = None
     for event in events[:10]:
-        start    = event.get("start", "")
-        date_str = start[:10]
-        time_str = "" if event.get("all_day") else start[11:16]
-        summary  = event.get("summary", "No title")[:45]
-        location = event.get("location")
+        start     = event.get("start", "")
+        date_str  = start[:10]
+        time_str  = "" if event.get("all_day") else start[11:16]
+        summary   = event.get("summary", "No title")[:45]
+        location  = event.get("location")
+        cal_label = event.get("calendar")
 
         if date_str != last_date:
             if last_date is not None:
@@ -446,6 +447,9 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
         if location and y + 42 < CONTENT_MAX_Y:
             draw.text((160, y), f"\u25b8 {location[:44]}", font=f_loc, fill=DARK)
             y += 44
+        if cal_label and y + 42 < CONTENT_MAX_Y:
+            draw.text((160, y), f"\u25cb {cal_label[:32]}", font=f_loc, fill=DARK)
+            y += 40
 
     _footer(draw, f"Calendar  \u2022  {data.get('fetched_at', '')[:16]}Z")
     return img
