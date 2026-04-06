@@ -1,10 +1,11 @@
 """
 TRMNL Dashboard Aggregator
-Fetches data from HA, Open-Meteo, ESPN, and Google Calendar.
+Fetches data from HA, Open-Meteo, Jolpica F1 API, ESPN, and Google Calendar.
 Implements the TRMNL BYOS /api/display protocol directly — no Inker required.
 Renders 1872×1404 PNG images with Pillow (ARM64 native).
 APScheduler refreshes data caches on configurable TTLs.
 """
+import asyncio
 import hashlib
 import io
 import os
@@ -12,6 +13,7 @@ import time
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -27,7 +29,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="TRMNL Aggregator", version="1.0.0")
+app = FastAPI(title="TRMNL Aggregator", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,21 +43,42 @@ HA_URL = os.getenv("HA_URL", "http://192.168.86.69:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 WEATHER_LAT = float(os.getenv("WEATHER_LAT", "37.6879"))
 WEATHER_LON = float(os.getenv("WEATHER_LON", "-121.7721"))
-ESPN_SPORT = os.getenv("ESPN_SPORT", "basketball")
-ESPN_LEAGUE = os.getenv("ESPN_LEAGUE", "nba")
-ESPN_TEAM_ID = os.getenv("ESPN_TEAM_ID", "11")
-ICAL_URLS = [u.strip() for u in os.getenv("ICAL_URL", "").split(",") if u.strip()]
-TRMNL_ACCESS_TOKEN = os.getenv("TRMNL_ACCESS_TOKEN", "")  # optional: set to enforce device auth
-# Explicit base URL override — set this to e.g. http://192.168.86.69:8081 if
-# request.base_url auto-detection is unreliable (behind proxy, Docker NAT, etc.)
+ICAL_URLS = [
+    u.strip() for u in os.getenv("ICAL_URL", "").split(",")
+    if u.strip() and u.strip() != "REPLACE_WITH_ICAL_URL"
+]
+TRMNL_ACCESS_TOKEN = os.getenv("TRMNL_ACCESS_TOKEN", "")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").rstrip("/")
 
+PACIFIC = ZoneInfo("America/Los_Angeles")
+
 # Playlist rotation: screens cycle in this order
-PLAYLIST = ["ha", "weather", "sports", "calendar"]
-TTL_HA = int(os.getenv("CACHE_TTL_HA", "300"))
+PLAYLIST = ["ha", "weather", "sports_f1", "sports_us", "sports_soccer", "calendar"]
+
+TTL_HA       = int(os.getenv("CACHE_TTL_HA",       "300"))
 TTL_CALENDAR = int(os.getenv("CACHE_TTL_CALENDAR", "900"))
-TTL_WEATHER = int(os.getenv("CACHE_TTL_WEATHER", "1800"))
-TTL_SPORTS = int(os.getenv("CACHE_TTL_SPORTS", "1800"))
+TTL_WEATHER  = int(os.getenv("CACHE_TTL_WEATHER",  "1800"))
+TTL_SPORTS   = int(os.getenv("CACHE_TTL_SPORTS",   "1800"))
+
+# F1 API (Jolpica — Ergast mirror)
+JOLPICA_F1_URL = "https://api.jolpi.ca/ergast/f1/current/next.json"
+
+# Soccer competitions to query per club
+LEAGUE_DISPLAY = {
+    "eng.1":                 "PL",
+    "mlb":                   "MLB",
+    "nfl":                   "NFL",
+}
+
+# Map playlist screen → (cache key, ttl)
+_SCREEN_CACHE: dict[str, tuple[str, int]] = {
+    "ha":           ("ha",           TTL_HA),
+    "weather":      ("weather",      TTL_WEATHER),
+    "sports_f1":    ("sports_f1",    TTL_SPORTS),
+    "sports_us":    ("sports_us",    TTL_SPORTS),
+    "sports_soccer":("sports_soccer",TTL_SPORTS),
+    "calendar":     ("calendar",     TTL_CALENDAR),
+}
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 _cache: dict[str, dict[str, Any]] = {}
@@ -76,20 +99,27 @@ def _age(key: str) -> str:
     secs = int(time.time() - entry["ts"])
     return f"{secs}s ago"
 
+# ── Time helpers ──────────────────────────────────────────────────────────────
+def _to_pt(dt_str: str) -> datetime | None:
+    """Parse UTC ISO string, return datetime in Pacific time."""
+    try:
+        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        return dt.astimezone(PACIFIC)
+    except Exception:
+        return None
+
 # ── Fetchers ──────────────────────────────────────────────────────────────────
 async def fetch_ha() -> dict:
     if not HA_TOKEN:
         log.warning("HA_TOKEN not set — skipping HA fetch")
         return {"error": "HA_TOKEN not configured"}
     headers = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
-    # Fetch a curated set of entity domains — add more as needed
     domains = ["binary_sensor", "sensor", "switch", "light", "lock", "cover", "alarm_control_panel", "person"]
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(f"{HA_URL}/api/states", headers=headers)
         resp.raise_for_status()
         all_states = resp.json()
 
-    # Filter to relevant entities and simplify
     filtered = []
     for state in all_states:
         domain = state["entity_id"].split(".")[0]
@@ -103,21 +133,20 @@ async def fetch_ha() -> dict:
                 "last_changed": state["last_changed"],
             })
 
-    # Quick summary stats
-    lights_on = sum(1 for e in filtered if e["entity_id"].startswith("light.") and e["state"] == "on")
-    switches_on = sum(1 for e in filtered if e["entity_id"].startswith("switch.") and e["state"] == "on")
+    lights_on    = sum(1 for e in filtered if e["entity_id"].startswith("light.") and e["state"] == "on")
+    switches_on  = sum(1 for e in filtered if e["entity_id"].startswith("switch.") and e["state"] == "on")
     locks_locked = sum(1 for e in filtered if e["entity_id"].startswith("lock.") and e["state"] == "locked")
-    locks_total = sum(1 for e in filtered if e["entity_id"].startswith("lock."))
-    doors_open = sum(1 for e in filtered if e["device_class"] in ("door", "garage_door") and e["state"] == "on")
-    alarms = [e for e in filtered if e["entity_id"].startswith("alarm_control_panel.")]
+    locks_total  = sum(1 for e in filtered if e["entity_id"].startswith("lock."))
+    doors_open   = sum(1 for e in filtered if e["device_class"] in ("door", "garage_door") and e["state"] == "on")
+    alarms       = [e for e in filtered if e["entity_id"].startswith("alarm_control_panel.")]
 
     return {
         "summary": {
-            "lights_on": lights_on,
-            "switches_on": switches_on,
+            "lights_on":    lights_on,
+            "switches_on":  switches_on,
             "locks_locked": f"{locks_locked}/{locks_total}",
-            "doors_open": doors_open,
-            "alarm": alarms[0]["state"] if alarms else "unknown",
+            "doors_open":   doors_open,
+            "alarm":        alarms[0]["state"] if alarms else "unknown",
         },
         "entities": filtered,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -164,92 +193,227 @@ async def fetch_weather() -> dict:
 
     return {
         "current": {
-            "temp_f": cur["temperature_2m"],
+            "temp_f":       cur["temperature_2m"],
             "feels_like_f": cur["apparent_temperature"],
             "humidity_pct": cur["relative_humidity_2m"],
-            "wind_mph": cur["wind_speed_10m"],
-            "precip_in": cur["precipitation"],
-            "condition": wmo_codes.get(cur["weather_code"], "Unknown"),
+            "wind_mph":     cur["wind_speed_10m"],
+            "precip_in":    cur["precipitation"],
+            "condition":    wmo_codes.get(cur["weather_code"], "Unknown"),
         },
         "forecast": forecast,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
-async def fetch_sports() -> dict:
-    url = (
-        f"https://site.api.espn.com/apis/site/v2/sports"
-        f"/{ESPN_SPORT}/{ESPN_LEAGUE}/scoreboard"
-        f"?dates={datetime.now().strftime('%Y%m%d')}"
-    )
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
+# ── Sports: F1 ────────────────────────────────────────────────────────────────
+async def fetch_sports_f1() -> dict:
+    """Fetch next F1 race weekend from Jolpica (Ergast mirror)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(JOLPICA_F1_URL)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        log.error(f"F1 fetch failed: {e}")
+        return {"error": str(e), "sessions": []}
 
-    games = []
-    for event in data.get("events", []):
-        competition = event["competitions"][0]
-        home = competition["competitors"][0]
-        away = competition["competitors"][1]
-        if home.get("homeAway") == "away":
-            home, away = away, home
+    races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+    if not races:
+        return {"error": "No upcoming F1 race found", "sessions": []}
 
-        our_team = None
-        for comp in competition["competitors"]:
-            if comp["team"].get("id") == ESPN_TEAM_ID:
-                our_team = comp
-                break
+    race = races[0]
 
-        status = competition["status"]["type"]
-        games.append({
-            "id": event["id"],
-            "name": event["name"],
-            "date": event["date"],
-            "status": status["description"],
-            "completed": status["completed"],
-            "home_team": home["team"]["displayName"],
-            "home_score": home.get("score"),
-            "away_team": away["team"]["displayName"],
-            "away_score": away.get("score"),
-            "our_team": our_team["team"]["displayName"] if our_team else None,
-            "our_score": our_team.get("score") if our_team else None,
-            "our_winner": our_team.get("winner") if our_team else None,
+    session_defs = [
+        ("FirstPractice",    "P1"),
+        ("SecondPractice",   "P2"),
+        ("ThirdPractice",    "P3"),
+        ("SprintQualifying", "Sprint Qual"),
+        ("Sprint",           "Sprint Race"),
+        ("Qualifying",       "Qualifying"),
+    ]
+
+    sessions = []
+    for key, label in session_defs:
+        s = race.get(key)
+        if not s:
+            continue
+        raw = f"{s['date']}T{s.get('time', '00:00:00Z')}"
+        dt = _to_pt(raw)
+        if dt:
+            sessions.append({
+                "name":         label,
+                "sort_key":     raw,
+                "display_date": dt.strftime("%a %b %-d"),
+                "display_time": dt.strftime("%-I:%M %p PT"),
+                "past":         dt < datetime.now(PACIFIC),
+            })
+
+    raw_race = f"{race.get('date', '')}T{race.get('time', '00:00:00Z')}"
+    dt_race = _to_pt(raw_race)
+    if dt_race:
+        sessions.append({
+            "name":         "Race",
+            "sort_key":     raw_race,
+            "display_date": dt_race.strftime("%a %b %-d"),
+            "display_time": dt_race.strftime("%-I:%M %p PT"),
+            "past":         dt_race < datetime.now(PACIFIC),
         })
 
-    # Also fetch tomorrow's schedule
-    tomorrow_url = (
-        f"https://site.api.espn.com/apis/site/v2/sports"
-        f"/{ESPN_SPORT}/{ESPN_LEAGUE}/scoreboard"
-        f"?dates={(datetime.now() + timedelta(days=1)).strftime('%Y%m%d')}"
-    )
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp2 = await client.get(tomorrow_url)
-        resp2.raise_for_status()
-        tomorrow_data = resp2.json()
-
-    tomorrow_games = []
-    for event in tomorrow_data.get("events", []):
-        competition = event["competitions"][0]
-        has_our_team = any(
-            c["team"].get("id") == ESPN_TEAM_ID
-            for c in competition["competitors"]
-        )
-        tomorrow_games.append({
-            "name": event["name"],
-            "date": event["date"],
-            "has_our_team": has_our_team,
-        })
+    sessions.sort(key=lambda s: s["sort_key"])
+    for s in sessions:
+        del s["sort_key"]
 
     return {
-        "today": games,
-        "tomorrow": tomorrow_games,
-        "sport": ESPN_SPORT,
-        "league": ESPN_LEAGUE.upper(),
+        "race_name": race.get("raceName", ""),
+        "round":     race.get("round", "?"),
+        "season":    race.get("season", ""),
+        "sessions":  sessions,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
+# ── Sports: ESPN helpers ───────────────────────────────────────────────────────
+async def _scoreboard_team_games(
+    client: httpx.AsyncClient,
+    sport: str,
+    league: str,
+    team_id: str,
+    days_ahead: int = 45,
+    max_games: int = 8,
+) -> list[dict]:
+    """
+    Query ESPN scoreboard for a date range and filter upcoming games for a team.
+    More reliable than the team schedule endpoint which caps out on future events.
+    """
+    today  = datetime.now(PACIFIC).strftime("%Y%m%d")
+    future = (datetime.now(PACIFIC) + timedelta(days=days_ahead)).strftime("%Y%m%d")
+    url    = (
+        f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
+        f"?dates={today}-{future}"
+    )
+    try:
+        resp = await client.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"ESPN scoreboard {sport}/{league} failed: {e}")
+        return []
+
+    now_utc = datetime.now(timezone.utc)
+    results = []
+
+    for event in data.get("events", []):
+        competition = (event.get("competitions") or [{}])[0]
+        status_type = competition.get("status", {}).get("type", {})
+        if status_type.get("completed", False):
+            continue
+
+        competitors = competition.get("competitors", [])
+        if not any(c["team"]["id"] == team_id for c in competitors):
+            continue
+
+        date_str = event.get("date", "")
+        try:
+            dt_utc = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if dt_utc < now_utc - timedelta(hours=6):
+            continue
+
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+
+        is_home  = bool(home and home["team"]["id"] == team_id)
+        opponent = home if not is_home else away
+        opp_name = opponent["team"]["displayName"] if opponent else "TBD"
+        opp_abbr = opponent["team"].get("abbreviation", "") if opponent else ""
+
+        pt = dt_utc.astimezone(PACIFIC)
+
+        results.append({
+            "date_iso":      dt_utc.isoformat(),
+            "display_date":  pt.strftime("%a %b %-d"),
+            "display_time":  pt.strftime("%-I:%M %p"),
+            "opponent":      opp_name,
+            "opponent_abbr": opp_abbr,
+            "is_home":       is_home,
+            "venue_flag":    "vs" if is_home else "@",
+            "competition":   LEAGUE_DISPLAY.get(league, league.upper()),
+        })
+
+        if len(results) >= max_games:
+            break
+
+    return results
+
+
+def _detect_series(games: list[dict]) -> list[dict]:
+    """Group consecutive games against the same opponent as a series."""
+    if not games:
+        return []
+    series_list: list[dict] = []
+    i = 0
+    while i < len(games):
+        opp = games[i]["opponent"]
+        grp = [games[i]]
+        j = i + 1
+        while j < len(games) and games[j]["opponent"] == opp:
+            grp.append(games[j])
+            j += 1
+        series_list.append({
+            "opponent":   opp,
+            "venue_flag": grp[0]["venue_flag"],
+            "is_home":    grp[0]["is_home"],
+            "num_games":  len(grp),
+            "start_date": grp[0]["display_date"],
+            "end_date":   grp[-1]["display_date"],
+            "games":      grp,
+        })
+        i = j
+    return series_list
+
+
+# ── Sports: US ────────────────────────────────────────────────────────────────
+async def fetch_sports_us() -> dict:
+    """Fetch upcoming SF Giants (series view) and SF 49ers games."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        giants_games, niners_games = await asyncio.gather(
+            # Giants ESPN team ID = 26; query scoreboard for upcoming 30 days
+            _scoreboard_team_games(client, "baseball", "mlb", "26", days_ahead=30, max_games=12),
+            # 49ers ESPN team ID = 25; NFL off-season Apr–Jul; show next 3 if any
+            _scoreboard_team_games(client, "football", "nfl", "25", days_ahead=180, max_games=3),
+        )
+
+    giants_series = _detect_series(giants_games)[:2]  # show next 2 series
+
+    return {
+        "giants": {"label": "SF Giants",   "series": giants_series},
+        "niners": {"label": "SF 49ers",    "games":  niners_games[:3]},
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── Sports: Soccer ────────────────────────────────────────────────────────────
+async def fetch_sports_soccer() -> dict:
+    """
+    Fetch upcoming Tottenham and Man City games from the EPL scoreboard.
+    UCL/FA Cup are not accessible through ESPN's public scoreboard API;
+    EPL covers the most relevant remaining fixtures (April–May run-in).
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        spurs_games, city_games = await asyncio.gather(
+            _scoreboard_team_games(client, "soccer", "eng.1", "367", days_ahead=60, max_games=5),
+            _scoreboard_team_games(client, "soccer", "eng.1", "382", days_ahead=60, max_games=5),
+        )
+
+    return {
+        "spurs":   {"label": "Tottenham Hotspur", "games": spurs_games},
+        "mancity": {"label": "Manchester City",   "games": city_games},
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── Calendar ──────────────────────────────────────────────────────────────────
 async def fetch_calendar() -> dict:
     if not ICAL_URLS:
         return {"error": "ICAL_URL not configured", "events": []}
@@ -271,7 +435,6 @@ async def fetch_calendar() -> dict:
                     if not dtstart:
                         continue
                     start = dtstart.dt
-                    # Handle date-only events
                     if not hasattr(start, "hour"):
                         start = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
                     elif start.tzinfo is None:
@@ -286,21 +449,21 @@ async def fetch_calendar() -> dict:
                             end = end.replace(tzinfo=timezone.utc)
 
                         all_events.append({
-                            "summary": str(component.get("SUMMARY", "")),
-                            "start": start.isoformat(),
-                            "end": end.isoformat() if end else None,
+                            "summary":  str(component.get("SUMMARY", "")),
+                            "start":    start.isoformat(),
+                            "end":      end.isoformat() if end else None,
                             "location": str(component.get("LOCATION", "")) or None,
-                            "all_day": not hasattr(dtstart.dt, "hour"),
+                            "all_day":  not hasattr(dtstart.dt, "hour"),
                         })
             except Exception as e:
                 log.warning(f"Failed to fetch iCal {url}: {e}")
 
     all_events.sort(key=lambda e: e["start"])
-
     return {
-        "events": all_events[:20],  # next 20 events max
+        "events": all_events[:20],
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
+
 
 # ── Scheduled refresh ─────────────────────────────────────────────────────────
 async def refresh_ha():
@@ -317,12 +480,26 @@ async def refresh_weather():
     except Exception as e:
         log.error(f"Weather refresh failed: {e}")
 
-async def refresh_sports():
+async def refresh_sports_f1():
     try:
-        _set("sports", await fetch_sports())
-        log.info("Sports cache refreshed")
+        _set("sports_f1", await fetch_sports_f1())
+        log.info("Sports F1 cache refreshed")
     except Exception as e:
-        log.error(f"Sports refresh failed: {e}")
+        log.error(f"Sports F1 refresh failed: {e}")
+
+async def refresh_sports_us():
+    try:
+        _set("sports_us", await fetch_sports_us())
+        log.info("Sports US cache refreshed")
+    except Exception as e:
+        log.error(f"Sports US refresh failed: {e}")
+
+async def refresh_sports_soccer():
+    try:
+        _set("sports_soccer", await fetch_sports_soccer())
+        log.info("Sports Soccer cache refreshed")
+    except Exception as e:
+        log.error(f"Sports Soccer refresh failed: {e}")
 
 async def refresh_calendar():
     try:
@@ -331,28 +508,17 @@ async def refresh_calendar():
     except Exception as e:
         log.error(f"Calendar refresh failed: {e}")
 
+
 scheduler = AsyncIOScheduler()
 
-# ── Static image cache (permanent, never pruned) ───────────────────────────────
-# Pre-rendered images that are always available regardless of rotation state.
+# ── Static image cache ─────────────────────────────────────────────────────────
 _static_images: dict[str, bytes] = {}
 
-def _render_static_png(name: str, data: dict) -> bytes:
-    """Render a screen and return PNG bytes."""
-    from renderer import render_screen
-    img = render_screen(name, data)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
 def _build_welcome_image() -> bytes:
-    """Generate a simple welcome/setup PNG for the setup endpoint."""
     from PIL import Image, ImageDraw
     img = Image.new("L", (1872, 1404), 255)
     draw = ImageDraw.Draw(img)
-    # Header bar
     draw.rectangle([0, 0, 1872, 120], fill=0)
-    # Use default font — truetype not guaranteed at startup
     draw.text((40, 35), "TRMNL X — Setup Complete", fill=255)
     draw.text((40, 300), "Connected to local BYOS server.", fill=0)
     draw.text((40, 380), "Display will update shortly.", fill=0)
@@ -362,7 +528,6 @@ def _build_welcome_image() -> bytes:
     return buf.getvalue()
 
 def _build_error_image(message: str = "Render error — retrying next cycle") -> bytes:
-    """Generate a simple error PNG to show when rendering fails."""
     from PIL import Image, ImageDraw
     img = Image.new("L", (1872, 1404), 255)
     draw = ImageDraw.Draw(img)
@@ -375,20 +540,23 @@ def _build_error_image(message: str = "Render error — retrying next cycle") ->
     mono.save(buf, format="PNG")
     return buf.getvalue()
 
+
 @app.on_event("startup")
 async def startup():
-    scheduler.add_job(refresh_ha, "interval", seconds=TTL_HA, id="ha")
-    scheduler.add_job(refresh_weather, "interval", seconds=TTL_WEATHER, id="weather")
-    scheduler.add_job(refresh_sports, "interval", seconds=TTL_SPORTS, id="sports")
-    scheduler.add_job(refresh_calendar, "interval", seconds=TTL_CALENDAR, id="calendar")
+    scheduler.add_job(refresh_ha,            "interval", seconds=TTL_HA,      id="ha")
+    scheduler.add_job(refresh_weather,       "interval", seconds=TTL_WEATHER,  id="weather")
+    scheduler.add_job(refresh_sports_f1,     "interval", seconds=TTL_SPORTS,   id="sports_f1")
+    scheduler.add_job(refresh_sports_us,     "interval", seconds=TTL_SPORTS,   id="sports_us")
+    scheduler.add_job(refresh_sports_soccer, "interval", seconds=TTL_SPORTS,   id="sports_soccer")
+    scheduler.add_job(refresh_calendar,      "interval", seconds=TTL_CALENDAR, id="calendar")
     scheduler.start()
-    # Warm the cache on boot
+
+    # Warm caches on boot
     await refresh_weather()
-    await refresh_sports()
+    await asyncio.gather(refresh_sports_f1(), refresh_sports_us(), refresh_sports_soccer())
     await refresh_calendar()
     await refresh_ha()
 
-    # Pre-render static images
     try:
         _static_images["welcome.png"] = _build_welcome_image()
         log.info("Welcome image generated")
@@ -402,59 +570,61 @@ async def startup():
 
     log.info("Aggregator started — all caches warmed")
 
+
 @app.on_event("shutdown")
 async def shutdown():
     scheduler.shutdown()
 
+
 # ── Base URL helper ────────────────────────────────────────────────────────────
 def _base_url(request: Request) -> str:
-    """Return the server base URL the TRMNL device can reach.
-
-    Priority:
-    1. SERVER_BASE_URL env var (explicit override)
-    2. request.base_url from Host header (works when device connects directly)
-    """
     if SERVER_BASE_URL:
         return SERVER_BASE_URL
     return str(request.base_url).rstrip("/")
+
 
 # ── API Endpoints ─────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "cache_ages": {k: _age(k) for k in ["ha", "weather", "sports", "calendar"]},
+        "cache_ages": {k: _age(k) for k in ["ha", "weather", "sports_f1", "sports_us", "sports_soccer", "calendar"]},
         "server_base_url": SERVER_BASE_URL or "(auto from Host header)",
     }
 
 @app.get("/data/ha")
 async def data_ha():
-    data = _get("ha", TTL_HA * 2) or await fetch_ha()
-    return data
+    return _get("ha", TTL_HA * 2) or await fetch_ha()
 
 @app.get("/data/weather")
 async def data_weather():
-    data = _get("weather", TTL_WEATHER * 2) or await fetch_weather()
-    return data
+    return _get("weather", TTL_WEATHER * 2) or await fetch_weather()
 
-@app.get("/data/sports")
-async def data_sports():
-    data = _get("sports", TTL_SPORTS * 2) or await fetch_sports()
-    return data
+@app.get("/data/sports/f1")
+async def data_sports_f1():
+    return _get("sports_f1", TTL_SPORTS * 2) or await fetch_sports_f1()
+
+@app.get("/data/sports/us")
+async def data_sports_us():
+    return _get("sports_us", TTL_SPORTS * 2) or await fetch_sports_us()
+
+@app.get("/data/sports/soccer")
+async def data_sports_soccer():
+    return _get("sports_soccer", TTL_SPORTS * 2) or await fetch_sports_soccer()
 
 @app.get("/data/calendar")
 async def data_calendar():
-    data = _get("calendar", TTL_CALENDAR * 2) or await fetch_calendar()
-    return data
+    return _get("calendar", TTL_CALENDAR * 2) or await fetch_calendar()
 
 @app.post("/refresh/{source}")
 async def manual_refresh(source: str):
-    """Trigger an immediate cache refresh for a data source."""
     refreshers = {
-        "ha": refresh_ha,
-        "weather": refresh_weather,
-        "sports": refresh_sports,
-        "calendar": refresh_calendar,
+        "ha":            refresh_ha,
+        "weather":       refresh_weather,
+        "sports_f1":     refresh_sports_f1,
+        "sports_us":     refresh_sports_us,
+        "sports_soccer": refresh_sports_soccer,
+        "calendar":      refresh_calendar,
     }
     if source not in refreshers:
         raise HTTPException(404, f"Unknown source: {source}. Valid: {list(refreshers)}")
@@ -463,19 +633,12 @@ async def manual_refresh(source: str):
 
 
 # ── TRMNL BYOS Protocol ───────────────────────────────────────────────────────
-# Device state: tracks which playlist screen each device is on
 _device_state: dict[str, int] = {}
-
-# Image cache: filename → PNG bytes (so /images/<filename> can serve it)
 _image_cache: dict[str, bytes] = {}
+
 
 @app.get("/api/setup")
 async def trmnl_setup(request: Request):
-    """
-    TRMNL BYOS /api/setup endpoint.
-    Called by the device during initial WiFi provisioning/setup.
-    Returns device credentials so the device can proceed to /api/display.
-    """
     device_id = request.headers.get("ID") or request.headers.get("X-Device-ID", "unknown")
     log.info(f"TRMNL setup request from device {device_id}")
     api_key = TRMNL_ACCESS_TOKEN if TRMNL_ACCESS_TOKEN else "byos-local-key"
@@ -495,26 +658,18 @@ async def trmnl_setup(request: Request):
 async def trmnl_display(request: Request):
     """
     TRMNL BYOS /api/display endpoint.
-    Device sends: ID header (MAC), Access-Token header.
-    Returns: JSON with image_url, filename, refresh_rate.
-
-    IMPORTANT: Must always return HTTP 200 with valid JSON.
-    Non-200 responses cause the firmware to show "WiFi connected, but API
-    connection cannot be established" (HTTPS_RESPONSE_CODE_INVALID error).
+    Must always return HTTP 200 — non-200 shows firmware error on device.
     """
     device_id = request.headers.get("ID") or request.headers.get("X-Device-ID", "unknown")
     token = request.headers.get("Access-Token", "")
 
     if TRMNL_ACCESS_TOKEN and token != TRMNL_ACCESS_TOKEN:
         log.warning(f"TRMNL device {device_id} sent wrong token: '{token}'")
-        # Return 200 with error image rather than 401 — a 401 would show
-        # "WiFi connected, but API connection cannot be established" on the device.
         base_url = _base_url(request)
-        error_filename = "error.png"
         return JSONResponse({
             "status": 0,
-            "image_url": f"{base_url}/images/{error_filename}",
-            "filename": error_filename,
+            "image_url": f"{base_url}/images/error.png",
+            "filename": "error.png",
             "refresh_rate": 300,
             "update_firmware": False,
             "firmware_url": "",
@@ -524,28 +679,16 @@ async def trmnl_display(request: Request):
 
     log.info(f"TRMNL display request from device {device_id}")
 
-    # Advance to next screen in playlist
     idx = _device_state.get(device_id, -1)
     idx = (idx + 1) % len(PLAYLIST)
     _device_state[device_id] = idx
     screen = PLAYLIST[idx]
 
-    # Fetch data for this screen
-    source_getters = {
-        "ha": lambda: _get("ha", TTL_HA * 2),
-        "weather": lambda: _get("weather", TTL_WEATHER * 2),
-        "sports": lambda: _get("sports", TTL_SPORTS * 2),
-        "calendar": lambda: _get("calendar", TTL_CALENDAR * 2),
-    }
-    data = source_getters[screen]() or {}
+    cache_key, ttl = _SCREEN_CACHE[screen]
+    data = _get(cache_key, ttl * 2) or {}
 
     base_url = _base_url(request)
 
-    # Render PNG — fall back to error image on failure rather than returning 500.
-    # A 500 would cause the firmware to show "WiFi connected, but API connection
-    # cannot be established" (HTTPS_RESPONSE_CODE_INVALID).
-    img_bytes = None
-    filename = None
     try:
         img = render_screen(screen, data)
         buf = io.BytesIO()
@@ -559,24 +702,19 @@ async def trmnl_display(request: Request):
 
     _image_cache[filename] = img_bytes
 
-    # Prune old images (keep last 20), but never prune static images
     if len(_image_cache) > 20:
         pruneable = [k for k in list(_image_cache.keys()) if k not in _static_images]
         for k in pruneable[:-20]:
             del _image_cache[k]
 
-    # Determine refresh interval for this screen (seconds)
-    refresh_map = {"ha": TTL_HA, "weather": TTL_WEATHER, "sports": TTL_SPORTS, "calendar": TTL_CALENDAR}
-    refresh_rate = refresh_map.get(screen, 300)
-
     image_url = f"{base_url}/images/{filename}"
-
     log.info(f"Serving {screen} → {filename} to device {device_id}")
+
     return JSONResponse({
         "status": 0,
         "image_url": image_url,
         "filename": filename,
-        "refresh_rate": refresh_rate,
+        "refresh_rate": ttl,
         "update_firmware": False,
         "firmware_url": "",
         "reset_firmware": False,
@@ -586,10 +724,7 @@ async def trmnl_display(request: Request):
 
 @app.get("/images/{filename}")
 async def serve_image(filename: str):
-    """Serve pre-rendered PNG images to the TRMNL device."""
-    # Check static images first (welcome, error, etc.)
     img_data = _static_images.get(filename) or _image_cache.get(filename)
     if not img_data:
         raise HTTPException(404, "Image not found or expired")
-    # All images are PNG regardless of extension in the filename
     return Response(content=img_data, media_type="image/png")
