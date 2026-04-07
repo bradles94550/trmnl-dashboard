@@ -78,6 +78,20 @@ _WEATHER_ICON: dict[str, str] = {
 }
 
 
+
+
+# ── Pro sports event filter ────────────────────────────────────────────────────
+_PRO_SPORTS_SUMMARIES = {
+    "tottenham", "spurs", "man city", "manchester city",
+    "sf giants", "giants", "49ers", "niners", "warriors",
+    "formula 1", "f1",
+}
+
+def _is_pro_sports_event(summary: str) -> bool:
+    """Return True if the event summary looks like a pro sports fixture."""
+    low = summary.lower()
+    return any(kw in low for kw in _PRO_SPORTS_SUMMARIES)
+
 def _weather_icon(condition: str) -> str:
     return _WEATHER_ICON.get(condition, "?")
 
@@ -205,11 +219,16 @@ def render_weather(data: dict[str, Any]) -> Image.Image:
     hum   = cur.get("humidity_pct", "--")
     wind  = cur.get("wind_mph", "--")
 
-    draw.text((40, y), f"{temp}\u00b0F", font=_font(160), fill=FG)
-    draw.text((40, y + 170), cond, font=_font(64), fill=FG)
-    draw.text((40, y + 248),
-              f"Feels like {feels}\u00b0  \u2022  Humidity {hum}%  \u2022  Wind {wind} mph",
-              font=_font(44), fill=DARK)
+    def _cx(text, font):
+        w = draw.textbbox((0, 0), text, font=font)[2]
+        return (WIDTH - w) // 2
+
+    f160 = _font(160); f64w = _font(64); f44w = _font(44)
+    temp_text  = f"{temp}\u00b0F"
+    feels_line = f"Feels like {feels}\u00b0  \u2022  Humidity {hum}%  \u2022  Wind {wind} mph"
+    draw.text((_cx(temp_text,  f160), y),       temp_text,  font=f160, fill=FG)
+    draw.text((_cx(cond,       f64w), y + 170), cond,       font=f64w, fill=FG)
+    draw.text((_cx(feels_line, f44w), y + 248), feels_line, font=f44w, fill=DARK)
 
     y2 = y + 320
     y2 = _divider(draw, y2, width=3)
@@ -452,7 +471,7 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
     events = data.get("events", [])
     if not events:
         draw.text((40, y + 40), "No upcoming events", font=_font(60), fill=FG)
-        draw.text((40, y + 120), "in the next 14 days", font=_font(44), fill=DARK)
+        draw.text((40, y + 120), "in the next 7 days", font=_font(44), fill=DARK)
         return img
 
     f_date_header = _font(44)
@@ -460,6 +479,7 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
     f_title       = _font(52)
     f_loc         = _font(36)
 
+    events = [e for e in events if not _is_pro_sports_event(e.get("summary", ""))]
     last_date = None
     for event in events[:10]:
         start     = event.get("start", "")
@@ -477,9 +497,11 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
                 label = d.strftime("%A, %B %-d")
             except ValueError:
                 label = date_str
-            draw.rectangle([0, y, WIDTH, y + 56], fill=DARK)
-            draw.text((24, y + 8), label, font=f_date_header, fill=BG)
-            y += 64
+            BAR_H = 56
+            draw.rectangle([0, y, WIDTH, y + BAR_H], fill=DARK)
+            _th = draw.textbbox((0, 0), label, font=f_date_header)[3]
+            draw.text((24, y + (BAR_H - _th) // 2), label, font=f_date_header, fill=BG)
+            y += BAR_H + 8
             last_date = date_str
 
         if y + 60 > CONTENT_MAX_Y:
@@ -513,10 +535,14 @@ def render_main(data: dict[str, Any]) -> Image.Image:
     BORDER     = 3
     PAD        = 14
     HDR_H      = 56
-    TITLE_PAD  = 24   # breathing room between title bar and content panels
+    TITLE_PAD  = 11   # breathing room between title bar and content panels
     CONTENT_Y0 = HDR_H + TITLE_PAD
     SPLIT_X    = 920   # left/right vertical divide
+    PANEL_GAP  = 16    # gap between top-left and top-right panels
+    L_RIGHT    = SPLIT_X - PANEL_GAP // 2
+    R_LEFT     = SPLIT_X + PANEL_GAP // 2
     SPLIT_Y    = 730   # top/bottom horizontal divide
+    SPLIT_GAP  = 14    # gap between top panels and bottom calendar panel
 
     # ── Header bar ────────────────────────────────────────────────────────────
     draw.rectangle([0, 0, WIDTH, HDR_H], fill=FG)
@@ -527,9 +553,9 @@ def render_main(data: dict[str, Any]) -> Image.Image:
     draw.text((WIDTH - ts_w - 20, 9), ts, font=f_hdr, fill=BG)
 
     # ── Section borders ───────────────────────────────────────────────────────
-    draw.rectangle([0,        CONTENT_Y0, SPLIT_X,     SPLIT_Y],     outline=FG, width=BORDER)
-    draw.rectangle([SPLIT_X,  CONTENT_Y0, WIDTH - 1,   SPLIT_Y],     outline=FG, width=BORDER)
-    draw.rectangle([0,        SPLIT_Y,    WIDTH - 1,   HEIGHT - 1],  outline=FG, width=BORDER)
+    draw.rectangle([0,        CONTENT_Y0, L_RIGHT,     SPLIT_Y - SPLIT_GAP // 2],     outline=FG, width=BORDER)
+    draw.rectangle([R_LEFT,   CONTENT_Y0, WIDTH - 1,   SPLIT_Y - SPLIT_GAP // 2],     outline=FG, width=BORDER)
+    draw.rectangle([0,        SPLIT_Y + SPLIT_GAP // 2, WIDTH - 1,   HEIGHT - 1],  outline=FG, width=BORDER)
 
     f_sec  = _font(34)
     f_team = _font(36)
@@ -538,10 +564,10 @@ def render_main(data: dict[str, Any]) -> Image.Image:
     # ── Top Left: Pro Sports ──────────────────────────────────────────────────
     sports        = data.get("sports_us", {})
     s_left        = BORDER + PAD
-    s_right       = SPLIT_X - BORDER - PAD
-    sports_bottom = SPLIT_Y - BORDER - 8
+    s_right       = L_RIGHT - BORDER - PAD
+    sports_bottom = SPLIT_Y - SPLIT_GAP // 2 - BORDER - 8
 
-    draw.rectangle([BORDER, CONTENT_Y0 + BORDER, SPLIT_X - BORDER, CONTENT_Y0 + BORDER + 42], fill=DARK)
+    draw.rectangle([BORDER, CONTENT_Y0 + BORDER, L_RIGHT - BORDER, CONTENT_Y0 + BORDER + 42], fill=DARK)
     draw.text((s_left, CONTENT_Y0 + BORDER + 4), "PRO SPORTS SCHEDULE", font=f_sec, fill=BG)
     sy = CONTENT_Y0 + BORDER + 50
 
@@ -609,11 +635,11 @@ def render_main(data: dict[str, Any]) -> Image.Image:
 
     # ── Top Right: Weather ────────────────────────────────────────────────────
     weather        = data.get("weather", {})
-    wx0            = SPLIT_X + BORDER + PAD
+    wx0            = R_LEFT + BORDER + PAD
     weather_right  = WIDTH - BORDER - PAD
-    weather_bottom = SPLIT_Y - BORDER - 8
+    weather_bottom = SPLIT_Y - SPLIT_GAP // 2 - BORDER - 8
 
-    draw.rectangle([SPLIT_X + BORDER, CONTENT_Y0 + BORDER, WIDTH - BORDER - 1, CONTENT_Y0 + BORDER + 42], fill=DARK)
+    draw.rectangle([R_LEFT + BORDER, CONTENT_Y0 + BORDER, WIDTH - BORDER - 1, CONTENT_Y0 + BORDER + 42], fill=DARK)
     draw.text((wx0, CONTENT_Y0 + BORDER + 4), "WEATHER  \u2014  Livermore", font=f_sec, fill=BG)
     wy = CONTENT_Y0 + BORDER + 50
 
@@ -628,49 +654,64 @@ def render_main(data: dict[str, Any]) -> Image.Image:
         feels_str = f"{int(feels)}\u00b0"  if isinstance(feels, (int, float)) else str(feels)
         wind_str  = f"{int(wind)} mph"     if isinstance(wind,  (int, float)) else str(wind)
 
-        draw.text((wx0, wy), temp_str, font=_font(130), fill=FG)
+        panel_cx = (R_LEFT + WIDTH) // 2
+        def _pcx(text, font):
+            w = draw.textbbox((0, 0), text, font=font)[2]
+            return panel_cx - w // 2
+
+        f130 = _font(130); f46 = _font(46); f34 = _font(34, bold=False)
+        draw.text((_pcx(temp_str, f130), wy), temp_str, font=f130, fill=FG)
         wy += 144
-        draw.text((wx0, wy), cond, font=_font(46), fill=FG)
+        draw.text((_pcx(cond, f46), wy), cond, font=f46, fill=FG)
         wy += 56
-        draw.text((wx0, wy),
-                  f"Feels {feels_str}  \u2022  Wind {wind_str}",
-                  font=_font(34, bold=False), fill=DARK)
+        feels_wind = f"Feels {feels_str}  \u2022  Wind {wind_str}"
+        draw.text((_pcx(feels_wind, f34), wy), feels_wind, font=f34, fill=DARK)
         wy += 48
         draw.line([wx0, wy, weather_right, wy], fill=FG, width=2)
         wy += 14
 
-        # 5-day forecast — center-justified within the weather panel
+        # 5-day forecast — column table (one column per day, fixed positions)
         forecast = weather.get("forecast", [])[:5]
-        f_day  = _font(38)
-        f_hi   = _font(42)
-        f_ico  = _font(44)
-        panel_cx = (SPLIT_X + WIDTH) // 2  # horizontal center of weather panel
+        if forecast:
+            f_day = _font(34)
+            f_hl  = _font(34)
+            f_ico = _font(38)
+            n_days = len(forecast)
+            panel_w = weather_right - wx0
+            col_w   = panel_w // n_days
 
-        for day in forecast:
-            if wy + 54 > weather_bottom:
-                break
-            date_str = day.get("date", "")
-            try:
-                day_lbl = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a")
-            except ValueError:
-                day_lbl = date_str[:3]
-            hi     = day.get("high", "--")
-            hi_s   = f"{int(hi)}\u00b0" if isinstance(hi, (int, float)) else str(hi)
-            icon   = _weather_icon(day.get("condition", ""))
-            precip = day.get("precip_in", 0)
-            if isinstance(precip, (int, float)) and precip > 0.05:
-                icon += "\u2614"
+            for i, day in enumerate(forecast):
+                cx = wx0 + i * col_w + col_w // 2
+                if i > 0:
+                    draw.line([wx0 + i * col_w, wy, wx0 + i * col_w, weather_bottom],
+                              fill=196, width=1)
+                date_str = day.get("date", "")
+                try:
+                    day_lbl = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a")
+                except ValueError:
+                    day_lbl = date_str[:3]
+                hi  = day.get("high", "--")
+                lo  = day.get("low", "--")
+                hi_s = f"{int(hi)}\u00b0" if isinstance(hi, (int, float)) else str(hi)
+                lo_s = f"{int(lo)}\u00b0" if isinstance(lo, (int, float)) else str(lo)
+                icon = _weather_icon(day.get("condition", ""))
+                precip = day.get("precip_in", 0)
+                if isinstance(precip, (int, float)) and precip > 0.05:
+                    icon += "\u2614"
+                hl_s = f"{hi_s}/{lo_s}"
 
-            w_day = draw.textbbox((0, 0), day_lbl, font=f_day)[2]
-            w_hi  = draw.textbbox((0, 0), hi_s,    font=f_hi)[2]
-            w_ico = draw.textbbox((0, 0), icon,     font=f_ico)[2]
-            GAP   = 16
-            total = w_day + GAP + w_hi + GAP + w_ico
-            rx    = panel_cx - total // 2
-            draw.text((rx,                        wy),     day_lbl, font=f_day, fill=FG)
-            draw.text((rx + w_day + GAP,          wy - 4), hi_s,   font=f_hi,  fill=FG)
-            draw.text((rx + w_day + GAP + w_hi + GAP, wy + 2), icon, font=f_ico, fill=DARK)
-            wy += 54
+                def _cc(text, font, cx=cx):
+                    w = draw.textbbox((0, 0), text, font=font)[2]
+                    return cx - w // 2
+
+                row0 = wy
+                row1 = wy + 42
+                row2 = wy + 86
+                if row2 + 36 > weather_bottom:
+                    break
+                draw.text((_cc(day_lbl, f_day), row0), day_lbl, font=f_day, fill=FG)
+                draw.text((_cc(icon,    f_ico), row1), icon,    font=f_ico, fill=DARK)
+                draw.text((_cc(hl_s,    f_hl),  row2), hl_s,   font=f_hl,  fill=FG)
     else:
         draw.text((wx0, wy + 20), "Weather unavailable", font=_font(46), fill=DARK)
 
@@ -679,11 +720,11 @@ def render_main(data: dict[str, Any]) -> Image.Image:
     events     = cal_data.get("events", [])
     cal_bottom = HEIGHT - BORDER - 8
 
-    draw.rectangle([BORDER, SPLIT_Y + BORDER, WIDTH - BORDER - 1, SPLIT_Y + BORDER + 42], fill=DARK)
-    draw.text((BORDER + PAD, SPLIT_Y + BORDER + 4),
+    draw.rectangle([BORDER, SPLIT_Y + SPLIT_GAP // 2 + BORDER, WIDTH - BORDER - 1, SPLIT_Y + SPLIT_GAP // 2 + BORDER + 42], fill=DARK)
+    draw.text((BORDER + PAD, SPLIT_Y + SPLIT_GAP // 2 + BORDER + 4),
               "FAMILY CALENDAR \u2014 NEXT 7 DAYS", font=f_sec, fill=BG)
 
-    cy_start = SPLIT_Y + BORDER + 52
+    cy_start = SPLIT_Y + SPLIT_GAP // 2 + BORDER + 52
     f_dhdr   = _font(36)
     f_evt    = _font(32, bold=False)
 
@@ -697,6 +738,7 @@ def render_main(data: dict[str, Any]) -> Image.Image:
         cur_col  = 0
         seen     : dict[int, str] = {}
 
+        events = [e for e in events if not _is_pro_sports_event(e.get("summary", ""))]
         for event in events[:40]:
             if cur_col >= 2:
                 break
@@ -718,9 +760,11 @@ def render_main(data: dict[str, Any]) -> Image.Image:
                     dlbl = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A, %b %-d")
                 except ValueError:
                     dlbl = date_str
-                draw.rectangle([cx - 4, cy, cx + HALF - 28, cy + 36], fill=DARK)
-                draw.text((cx, cy + 2), dlbl, font=f_dhdr, fill=BG)
-                cy += 40
+                _DHDR_H = 36
+                draw.rectangle([cx - 4, cy, cx + HALF - 28, cy + _DHDR_H], fill=DARK)
+                _dth = draw.textbbox((0, 0), dlbl, font=f_dhdr)[3]
+                draw.text((cx, cy + (_DHDR_H - _dth) // 2), dlbl, font=f_dhdr, fill=BG)
+                cy += _DHDR_H + 4
                 seen[cur_col] = date_str
                 col_y[cur_col] = cy
 
@@ -736,9 +780,11 @@ def render_main(data: dict[str, Any]) -> Image.Image:
                         dlbl = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A, %b %-d")
                     except ValueError:
                         dlbl = date_str
-                    draw.rectangle([cx - 4, cy, cx + HALF - 28, cy + 36], fill=DARK)
-                    draw.text((cx, cy + 2), dlbl, font=f_dhdr, fill=BG)
-                    cy += 40
+                    _DHDR_H = 36
+                    draw.rectangle([cx - 4, cy, cx + HALF - 28, cy + _DHDR_H], fill=DARK)
+                    _dth = draw.textbbox((0, 0), dlbl, font=f_dhdr)[3]
+                    draw.text((cx, cy + (_DHDR_H - _dth) // 2), dlbl, font=f_dhdr, fill=BG)
+                    cy += _DHDR_H + 4
                     seen[cur_col] = date_str
                     col_y[cur_col] = cy
 

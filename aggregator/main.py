@@ -480,7 +480,7 @@ async def fetch_calendar() -> dict:
         return {"error": "No calendar source available (JSON missing/stale, ICAL_URL not set)", "events": []}
 
     now = datetime.now(timezone.utc)
-    window_end = now + timedelta(days=14)
+    window_end = now + timedelta(days=7)
     all_events = []
 
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
