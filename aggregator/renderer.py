@@ -633,6 +633,29 @@ def render_main(data: dict[str, Any]) -> Image.Image:
                       font=f_game, fill=DARK)
             sy += 30
 
+    # ── Soccer in sports panel ───────────────────────────────────────────────
+    soccer_data = data.get("sports_soccer", {})
+    for club_key, club_label in [("spurs", "Spurs"), ("mancity", "Man City")]:
+        club = soccer_data.get(club_key, {})
+        club_games = club.get("games", [])
+        upcoming = [g for g in club_games if not g.get("past", False)]
+        if not upcoming:
+            continue
+        if sy + 12 < sports_bottom - 40:
+            draw.line([s_left, sy + 4, s_right, sy + 4], fill=128, width=1)
+            sy += 14
+        if sy + 40 < sports_bottom:
+            draw.text((s_left, sy), club_label, font=f_team, fill=FG)
+            sy += 38
+            for game in upcoming[:1]:
+                if sy + 30 > sports_bottom:
+                    break
+                venue = game.get("venue_flag", "vs")
+                opp   = game.get("opponent", "")[:14]
+                dt    = game.get("display_date", "")
+                draw.text((s_left + 8, sy), f"{venue} {opp}  {dt}", font=f_game, fill=FG)
+                sy += 30
+
     # ── Top Right: Weather ────────────────────────────────────────────────────
     weather        = data.get("weather", {})
     wx0            = R_LEFT + BORDER + PAD

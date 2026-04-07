@@ -607,10 +607,11 @@ async def refresh_calendar():
 async def refresh_main():
     try:
         combined = {
-            "weather":   _get("weather",   TTL_WEATHER  * 4) or await fetch_weather(),
-            "sports_us": _get("sports_us", TTL_SPORTS   * 4) or await fetch_sports_us(),
-            "sports_f1": _get("sports_f1", TTL_SPORTS   * 4) or await fetch_sports_f1(),
-            "calendar":  _get("calendar",  TTL_CALENDAR * 4) or await fetch_calendar(),
+            "weather":      _get("weather",      TTL_WEATHER  * 4) or await fetch_weather(),
+            "sports_us":    _get("sports_us",    TTL_SPORTS   * 4) or await fetch_sports_us(),
+            "sports_f1":    _get("sports_f1",    TTL_SPORTS   * 4) or await fetch_sports_f1(),
+            "sports_soccer": _get("sports_soccer", TTL_SPORTS * 4) or await fetch_sports_soccer(),
+            "calendar":     _get("calendar",     TTL_CALENDAR * 4) or await fetch_calendar(),
         }
         _set("main", combined)
         log.info("Main dashboard cache refreshed")
