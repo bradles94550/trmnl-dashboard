@@ -92,6 +92,13 @@ def _is_pro_sports_event(summary: str) -> bool:
     low = summary.lower()
     return any(kw in low for kw in _PRO_SPORTS_SUMMARIES)
 
+def _fmt_time(hhmm: str) -> str:
+    """Convert HH:MM (24-hr ISO slice) to 12-hour format like '5:30 PM'."""
+    try:
+        return datetime.strptime(hhmm, "%H:%M").strftime("%-I:%M %p")
+    except ValueError:
+        return hhmm
+
 def _weather_icon(condition: str) -> str:
     return _WEATHER_ICON.get(condition, "?")
 
@@ -484,7 +491,7 @@ def render_calendar(data: dict[str, Any]) -> Image.Image:
     for event in events[:10]:
         start     = event.get("start", "")
         date_str  = start[:10]
-        time_str  = "" if event.get("all_day") else start[11:16]
+        time_str  = "" if event.get("all_day") else _fmt_time(start[11:16])
         summary   = event.get("summary", "No title")[:45]
         location  = event.get("location")
         cal_label = event.get("calendar")
@@ -652,7 +659,7 @@ def render_main(data: dict[str, Any]) -> Image.Image:
                     break
                 venue = game.get("venue_flag", "vs")
                 opp   = game.get("opponent", "")[:14]
-                dt    = game.get("display_date", "")
+                dt    = f"{game.get('display_date', '')}  {game.get('display_time', '')}".strip()
                 draw.text((s_left + 8, sy), f"{venue} {opp}  {dt}", font=f_game, fill=FG)
                 sy += 30
 
@@ -769,7 +776,7 @@ def render_main(data: dict[str, Any]) -> Image.Image:
             cy       = col_y[cur_col]
             start    = event.get("start", "")
             date_str = start[:10]
-            time_str = "" if event.get("all_day") else start[11:16]
+            time_str = "" if event.get("all_day") else _fmt_time(start[11:16])
             summary  = event.get("summary", "")
 
             # Date header

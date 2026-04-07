@@ -466,7 +466,21 @@ async def fetch_calendar() -> dict:
             if age < APPLE_CAL_MAX_AGE:
                 with open(APPLE_CAL_JSON_PATH) as f:
                     data = json.load(f)
-                log.info(f"Using Apple Calendar JSON (age {int(age)}s, {len(data.get('events', []))} events)")
+                # Filter to 7-day window (calendar-sync.py exports 14 days)
+                now_utc    = datetime.now(timezone.utc)
+                window_end = now_utc + timedelta(days=7)
+                filtered = []
+                for e in data.get("events", []):
+                    try:
+                        start = datetime.fromisoformat(e["start"])
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=timezone.utc)
+                        if start <= window_end:
+                            filtered.append(e)
+                    except Exception:
+                        filtered.append(e)
+                data["events"] = filtered
+                log.info(f"Using Apple Calendar JSON (age {int(age)}s, {len(filtered)} events in 7-day window)")
                 return data
             else:
                 log.warning(f"Apple Calendar JSON is stale ({int(age)}s), falling back to iCal")
